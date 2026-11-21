@@ -17,6 +17,7 @@
         </p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
+        {% if enable_admin %}
         <button onclick="seedTeam('台灣山林', 28)" class="px-3 py-1.5 text-xs rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white">
           + 灌入台灣山林(28人)
         </button>
@@ -26,6 +27,7 @@
         <button onclick="cleanupTest()" class="px-3 py-1.5 text-xs rounded-lg bg-rose-900/70 hover:bg-rose-800 text-rose-200 border border-rose-700/50">
           清除測試資料
         </button>
+        {% endif %}
         {% if logged_team %}
         <button onclick="logoutTeam()" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200">
           登出（{{ logged_team }}）
@@ -300,6 +302,7 @@
       </div>
     </div>
 
+    {% if enable_admin %}
     <!-- 底部工具區：CPBL/冬盟抓數 + 手動建檔/改守位 -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
       <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
@@ -365,6 +368,7 @@
         <p id="admMsg" class="text-xs text-emerald-400"></p>
       </div>
     </div>
+    {% endif %}
     {% endif %}
   </div>
 
