@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta
+import os
 import sqlite3
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -8,6 +9,23 @@ from cpbl_fetcher import import_cpbl_game
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
+
+ENABLE_ADMIN = os.environ.get("ENABLE_ADMIN", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+
+def ensure_admin_enabled():
+    if not ENABLE_ADMIN:
+        return JSONResponse(
+            {"ok": False, "error": "此功能僅限本機後台使用"},
+            status_code=403,
+        )
+    return None
+
 
 TEAMS = ["樂天桃猿", "中信兄弟", "味全龍", "富邦悍將"]
 TEST_TEAMS = ["台灣山林", "台灣海洋"]
@@ -926,9 +944,13 @@ def api_lineup_move(request: Request, payload: LineupMovePayload):
 
 @app.post("/api/admin/player")
 def api_admin_player(payload: PlayerAdminPayload):
+    denied = ensure_admin_enabled()
+    if denied:
+        return denied
+
     name = (payload.name or "").strip()
     if not name:
-        return JSONResponse({"ok": False, "error": "請輸入球員姓名"}, status_code=400)
+        return JSONResponse({"ok": False, "error": "請輸入球員名稱"}, status_code=400)
 
     pos_list = [p.strip().upper() for p in (payload.positions or []) if p.strip()]
     pos_str = ",".join(pos_list)
@@ -960,7 +982,7 @@ def api_admin_player(payload: PlayerAdminPayload):
         fteam = "" if roster_slot == "RELEASED" else (payload.fantasy_team or "")
         cursor.execute("""
             INSERT INTO team_rosters (player_id, fantasy_team, roster_slot, lineup_slot, slot_changed_at, status_reason)
-            VALUES (?, ?, ?, ?, ?, '手動更新')
+            VALUES (?, ?, ?, ?, ?, '手動新增／更新')
             ON CONFLICT(player_id) DO UPDATE SET
                 fantasy_team = excluded.fantasy_team,
                 roster_slot = excluded.roster_slot,
@@ -977,6 +999,10 @@ def api_admin_player(payload: PlayerAdminPayload):
 
 @app.post("/api/stats/import/cpbl")
 def api_import_cpbl(payload: CpblImportPayload):
+    denied = ensure_admin_enabled()
+    if denied:
+        return denied
+
     try:
         result = import_cpbl_game(
             db_path="fantasy_league.db",
@@ -991,6 +1017,10 @@ def api_import_cpbl(payload: CpblImportPayload):
 
 @app.post("/api/admin/seed-winter-test")
 def api_seed_winter_test(payload: SeedWinterPayload):
+    denied = ensure_admin_enabled()
+    if denied:
+        return denied
+
     team = payload.team if payload.team in ALL_AVAILABLE_TEAMS else "台灣海洋"
     count = max(1, min(60, int(payload.count or 25)))
     sample_plan = [
@@ -1094,6 +1124,10 @@ def api_seed_winter_test(payload: SeedWinterPayload):
 
 @app.post("/api/admin/cleanup-winter-test")
 def api_cleanup_winter_test():
+    denied = ensure_admin_enabled()
+    if denied:
+        return denied
+
     conn = get_db()
     cursor = conn.cursor()
     try:
@@ -1107,8 +1141,9 @@ def api_cleanup_winter_test():
         return JSONResponse({"ok": True, "removed_players": cnt})
     finally:
         conn.close()
+
+
 if __name__ == "__main__":
-    import os
     import uvicorn
 
     port = int(os.environ.get("PORT", 8000))
