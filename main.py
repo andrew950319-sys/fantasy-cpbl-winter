@@ -53,10 +53,58 @@ VALID_SLOTS = {"ACTIVE", "MINORS", "IL", "SPECIAL", "RELEASED"}
 LOCKED_10_DAYS_SLOTS = {"MINORS", "IL"}
 LOCK_DAYS = 10
 
-LINEUP_SLOTS_BATTER = ["C", "1B", "2B", "3B", "SS", "OF", "DH"]
-LINEUP_SLOTS_PITCHER = ["SP1", "SP2", "SP3", "P1", "P2", "P3", "RP1", "RP2", "RP3"]
-SCORING_LINEUP_SLOTS = set(LINEUP_SLOTS_BATTER + LINEUP_SLOTS_PITCHER)
-ALL_ACTIVE_LINEUP_SLOTS = SCORING_LINEUP_SLOTS | {"BENCH"}
+# 先發槽位順序：SP1~3, P1~3, CP1~3, DH(2), C, 1B, 2B, 3B, SS, OF(3)，最後為 BN
+LINEUP_SLOTS_PITCHER_STARTER = ["SP1", "SP2", "SP3"]
+LINEUP_SLOTS_PITCHER_GENERAL = ["P1", "P2", "P3"]
+LINEUP_SLOTS_CLOSER = ["CP1", "CP2", "CP3"]
+LINEUP_SLOTS_DH = ["DH1", "DH2"]
+LINEUP_SLOTS_INFIELD = ["C", "1B", "2B", "3B", "SS"]
+LINEUP_SLOTS_OUTFIELD = ["OF1", "OF2", "OF3"]
+
+LINEUP_SLOTS_ORDERED = (
+    LINEUP_SLOTS_PITCHER_STARTER
+    + LINEUP_SLOTS_PITCHER_GENERAL
+    + LINEUP_SLOTS_CLOSER
+    + LINEUP_SLOTS_DH
+    + LINEUP_SLOTS_INFIELD
+    + LINEUP_SLOTS_OUTFIELD
+)
+LINEUP_SLOTS_BATTER = LINEUP_SLOTS_DH + LINEUP_SLOTS_INFIELD + LINEUP_SLOTS_OUTFIELD
+LINEUP_SLOTS_PITCHER = LINEUP_SLOTS_PITCHER_STARTER + LINEUP_SLOTS_PITCHER_GENERAL + LINEUP_SLOTS_CLOSER
+
+SLOT_LABELS = {
+    "BN": "BN",
+    "BENCH": "BN",
+    "SP1": "SP1",
+    "SP2": "SP2",
+    "SP3": "SP3",
+    "P1": "P1",
+    "P2": "P2",
+    "P3": "P3",
+    "CP1": "CP1",
+    "CP2": "CP2",
+    "CP3": "CP3",
+    "DH1": "DH",
+    "DH2": "DH",
+    "DH": "DH",
+    "C": "C",
+    "1B": "1B",
+    "2B": "2B",
+    "3B": "3B",
+    "SS": "SS",
+    "OF1": "OF",
+    "OF2": "OF",
+    "OF3": "OF",
+    "OF": "OF",
+}
+
+SLOT_ORDER_MAP = {slot: idx for idx, slot in enumerate(LINEUP_SLOTS_ORDERED)}
+SLOT_ORDER_MAP["BN"] = len(LINEUP_SLOTS_ORDERED)
+SLOT_ORDER_MAP["BENCH"] = len(LINEUP_SLOTS_ORDERED)
+
+SCORING_LINEUP_SLOTS = set(LINEUP_SLOTS_ORDERED)
+BENCH_SLOTS = {"BN", "BENCH"}
+ALL_ACTIVE_LINEUP_SLOTS = SCORING_LINEUP_SLOTS | BENCH_SLOTS
 
 MAX_ACTIVE_ROSTER = 25
 MAX_TOTAL_ROSTER = 60
@@ -84,7 +132,7 @@ class LoginPayload(BaseModel):
 class LineupMovePayload(BaseModel):
     player_id: str
     roster_slot: str
-    lineup_slot: str = "BENCH"
+    lineup_slot: str = "BN"
     reason: str = ""
     force_override: bool = False
 
@@ -92,7 +140,7 @@ class LineupMovePayload(BaseModel):
 class SignFreeAgentPayload(BaseModel):
     player_id: str
     roster_slot: str = "ACTIVE"
-    lineup_slot: str = "BENCH"
+    lineup_slot: str = "BN"
     force_override: bool = False
 
 
@@ -103,7 +151,7 @@ class PlayerAdminPayload(BaseModel):
     fantasy_team: str = ""
     positions: list[str] = []
     roster_slot: str = "ACTIVE"
-    lineup_slot: str = "BENCH"
+    lineup_slot: str = "BN"
 
 
 class CpblImportPayload(BaseModel):
@@ -123,6 +171,18 @@ def get_db():
     conn = sqlite3.connect("fantasy_league.db")
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def normalize_lineup_slot(slot: str | None) -> str:
+    s = (slot or "BN").strip().upper()
+    if s in {"", "BENCH"}:
+        return "BN"
+    return s
+
+
+def format_slot_label(slot: str | None) -> str:
+    s = normalize_lineup_slot(slot)
+    return SLOT_LABELS.get(s, s)
 
 
 def ensure_roster_columns(cursor):
@@ -158,7 +218,7 @@ def ensure_extended_schema(cursor):
             player_id TEXT PRIMARY KEY,
             fantasy_team TEXT DEFAULT '',
             roster_slot TEXT NOT NULL DEFAULT 'ACTIVE',
-            lineup_slot TEXT NOT NULL DEFAULT 'BENCH',
+            lineup_slot TEXT NOT NULL DEFAULT 'BN',
             slot_changed_at TEXT,
             status_reason TEXT DEFAULT ''
         )
@@ -169,7 +229,7 @@ def ensure_extended_schema(cursor):
     cursor.execute("PRAGMA table_info(team_rosters)")
     r_cols = {r["name"] for r in cursor.fetchall()}
     if "lineup_slot" not in r_cols:
-        cursor.execute("ALTER TABLE team_rosters ADD COLUMN lineup_slot TEXT DEFAULT 'BENCH'")
+        cursor.execute("ALTER TABLE team_rosters ADD COLUMN lineup_slot TEXT DEFAULT 'BN'")
 
     cursor.execute("PRAGMA table_info(players)")
     p_cols = {r["name"] for r in cursor.fetchall()}
@@ -194,8 +254,8 @@ def ensure_extended_schema(cursor):
 
     cursor.execute("""
         UPDATE team_rosters
-        SET lineup_slot = 'BENCH'
-        WHERE roster_slot = 'ACTIVE' AND (lineup_slot IS NULL OR lineup_slot = '')
+        SET lineup_slot = 'BN'
+        WHERE roster_slot = 'ACTIVE' AND (lineup_slot IS NULL OR lineup_slot = '' OR UPPER(lineup_slot) = 'BENCH')
     """)
 
 
@@ -340,46 +400,48 @@ def parse_player_positions(pos_str: str | None, fallback_pos: str | None) -> set
     for t in tokens:
         if t in {"LF", "CF", "RF"}:
             normalized.add("OF")
-        elif t in {"投", "CP", "CL"}:
-            normalized.add("RP" if t in {"CP", "CL"} else "P")
+        elif t in {"投", "CL"}:
+            normalized.add("CP" if t == "CL" else "P")
         else:
             normalized.add(t)
     return normalized
 
 
 def is_pitcher_positions(positions: set[str]) -> bool:
-    return bool(positions & {"P", "SP", "RP"})
+    return bool(positions & {"P", "SP", "RP", "CP"})
 
 
 def is_lineup_slot_eligible(lineup_slot: str, positions: set[str]) -> tuple[bool, str]:
-    slot = (lineup_slot or "BENCH").upper()
-    if slot == "BENCH":
+    slot = normalize_lineup_slot(lineup_slot)
+    if slot == "BN":
         return True, ""
     if slot not in SCORING_LINEUP_SLOTS:
-        return False, f"無效的先發槽位：{slot}"
+        return False, f"無效的先發槽位：{format_slot_label(slot)}"
 
     is_pit = is_pitcher_positions(positions)
-    if slot in LINEUP_SLOTS_BATTER:
-        if is_pit and not (positions - {"P", "SP", "RP"}):
+    if slot.startswith("DH"):
+        return True, ""
+
+    if slot in LINEUP_SLOTS_INFIELD + LINEUP_SLOTS_OUTFIELD:
+        label = format_slot_label(slot)
+        if is_pit and not (positions - {"P", "SP", "RP", "CP"}):
             return False, "投手不能放進野手先發槽位"
-        if slot == "DH":
-            return True, ""
-        if slot not in positions:
-            return False, f"球員無 {slot} 守位資格（目前守位：{', '.join(sorted(positions)) or '無'}）"
+        if label not in positions:
+            return False, f"球員無 {label} 守位資格（目前守位：{', '.join(sorted(positions)) or '無'}）"
         return True, ""
 
     if not is_pit:
         return False, "非投手不能放進投手槽位"
-    if slot.startswith("P"):
-        return True, ""
     if slot.startswith("SP"):
-        if "SP" in positions or "P" in positions:
+        if positions & {"SP", "P"}:
             return True, ""
         return False, "此投手無 SP 資格"
-    if slot.startswith("RP"):
-        if "RP" in positions or "P" in positions:
+    if slot.startswith("CP"):
+        if positions & {"CP", "RP", "P"}:
             return True, ""
-        return False, "此投手無 RP 資格"
+        return False, "此投手無 CP 資格"
+    if slot.startswith("P"):
+        return True, ""
 
     return False, "不符合槽位資格"
 
@@ -423,13 +485,19 @@ def validate_roster_limits(
     """, (fantasy_team,))
     rows = [dict(r) for r in cursor.fetchall()]
 
-    sim_map = {r["player_id"]: {"roster_slot": r["roster_slot"], "lineup_slot": r["lineup_slot"]} for r in rows}
+    sim_map = {
+        r["player_id"]: {
+            "roster_slot": r["roster_slot"],
+            "lineup_slot": normalize_lineup_slot(r["lineup_slot"]),
+        }
+        for r in rows
+    }
     if new_roster_slot == "RELEASED":
         sim_map.pop(moving_player_id, None)
     else:
         sim_map[moving_player_id] = {
             "roster_slot": new_roster_slot,
-            "lineup_slot": new_lineup_slot if new_roster_slot == "ACTIVE" else "BENCH",
+            "lineup_slot": normalize_lineup_slot(new_lineup_slot) if new_roster_slot == "ACTIVE" else "BN",
         }
 
     total_count = len(sim_map)
@@ -443,7 +511,7 @@ def validate_roster_limits(
     used_scoring_slots = [
         v["lineup_slot"]
         for v in active_items
-        if (v.get("lineup_slot") or "BENCH") in SCORING_LINEUP_SLOTS
+        if normalize_lineup_slot(v.get("lineup_slot")) in SCORING_LINEUP_SLOTS
     ]
     if len(used_scoring_slots) != len(set(used_scoring_slots)):
         return False, "該先發守位槽位已被其他球員佔用，請先更換"
@@ -476,7 +544,7 @@ def calc_team_12_cats(fantasy_team: str, date_filter: str = "ALL"):
     scoring_pids = [
         row["player_id"]
         for row in cursor.fetchall()
-        if (row["lineup_slot"] or "BENCH").strip().upper() in SCORING_LINEUP_SLOTS
+        if normalize_lineup_slot(row["lineup_slot"]) in SCORING_LINEUP_SLOTS
     ]
 
     agg = {
@@ -580,7 +648,8 @@ def _query_players_block(cursor, where_sql: str, where_params: list, date_filter
         lock_info = calc_lock_info(d["roster_slot"], d.get("slot_changed_at"))
         ruling_code, ruling_text = evaluate_ruling_status(d["roster_slot"], d.get("status_reason") or "")
         pos_set = parse_player_positions(d.get("positions"), d.get("position"))
-        lineup_slot = d.get("lineup_slot") or "BENCH"
+        lineup_slot = normalize_lineup_slot(d.get("lineup_slot"))
+        lineup_label = format_slot_label(lineup_slot)
         is_scoring = d["roster_slot"] == "ACTIVE" and lineup_slot in SCORING_LINEUP_SLOTS
 
         items.append({
@@ -592,6 +661,7 @@ def _query_players_block(cursor, where_sql: str, where_params: list, date_filter
             "positions": sorted(pos_set),
             "slot": d["roster_slot"],
             "lineup_slot": lineup_slot,
+            "lineup_label": lineup_label,
             "is_scoring": is_scoring,
             "is_locked": lock_info["is_locked"],
             "days_elapsed": lock_info["days_elapsed"],
@@ -642,7 +712,11 @@ def get_team_players_with_stats(fantasy_team: str, date_filter: str = "ALL"):
             grouped[item["slot"]].append(item)
 
     grouped["ACTIVE"].sort(
-        key=lambda x: (0 if x["is_scoring"] else 1, x["player_id"])
+        key=lambda x: (
+            0 if x["is_scoring"] else 1,
+            SLOT_ORDER_MAP.get(x["lineup_slot"], 999),
+            x["player_id"],
+        )
     )
     return grouped
 
@@ -682,7 +756,7 @@ def read_roster(request: Request, team: str = "樂天桃猿"):
             JOIN team_rosters r ON p.player_id = r.player_id
             WHERE r.fantasy_team = ? AND r.roster_slot = 'ACTIVE'
         """, (team,))
-        active_players = [(row["player_id"], row["name"], row["position"], row["lineup_slot"]) for row in cursor.fetchall()]
+        active_players = [(row["player_id"], row["name"], row["position"], format_slot_label(row["lineup_slot"])) for row in cursor.fetchall()]
 
         cursor.execute("""
             SELECT p.player_id, p.name, p.position
@@ -707,6 +781,7 @@ def read_roster(request: Request, team: str = "樂天桃猿"):
             "current_team": team,
             "active_players": active_players,
             "minors_players": minors_players,
+            "lineup_slots_ordered": LINEUP_SLOTS_ORDERED,
             "batter_slots": LINEUP_SLOTS_BATTER,
             "pitcher_slots": LINEUP_SLOTS_PITCHER,
         }
@@ -807,6 +882,8 @@ def read_matchup(request: Request, code: str = None, opp: str = None, stat_date:
             "total_on_team": total_on_team,
             "max_active": MAX_ACTIVE_ROSTER,
             "max_total": MAX_TOTAL_ROSTER,
+            "lineup_slots_ordered": LINEUP_SLOTS_ORDERED,
+            "slot_labels": SLOT_LABELS,
             "batter_slots": LINEUP_SLOTS_BATTER,
             "pitcher_slots": LINEUP_SLOTS_PITCHER,
             "il_reasons": IL_REASONS,
@@ -848,7 +925,7 @@ def api_sign_free_agent(request: Request, payload: SignFreeAgentPayload):
         return JSONResponse({"ok": False, "error": "尚未登入"}, status_code=401)
 
     target_roster = "ACTIVE"
-    target_lineup = (payload.lineup_slot or "BENCH").upper()
+    target_lineup = normalize_lineup_slot(payload.lineup_slot)
 
     conn = get_db()
     cursor = conn.cursor()
@@ -892,7 +969,7 @@ def api_lineup_move(request: Request, payload: LineupMovePayload):
         return JSONResponse({"ok": False, "error": "尚未登入"}, status_code=401)
 
     new_roster = payload.roster_slot.upper()
-    new_lineup = (payload.lineup_slot or "BENCH").upper()
+    new_lineup = normalize_lineup_slot(payload.lineup_slot)
     if new_roster not in VALID_SLOTS:
         return JSONResponse({"ok": False, "error": "無效的名單狀態"}, status_code=400)
     if new_roster == "ACTIVE" and new_lineup not in ALL_ACTIVE_LINEUP_SLOTS:
@@ -939,12 +1016,12 @@ def api_lineup_move(request: Request, payload: LineupMovePayload):
         if new_roster == "RELEASED":
             cursor.execute("""
                 UPDATE team_rosters
-                SET fantasy_team = '', roster_slot = 'RELEASED', lineup_slot = 'BENCH',
+                SET fantasy_team = '', roster_slot = 'RELEASED', lineup_slot = 'BN',
                     slot_changed_at = ?, status_reason = '釋出至自由球員'
                 WHERE player_id = ?
             """, (now_iso, payload.player_id))
         else:
-            final_lineup = new_lineup if new_roster == "ACTIVE" else "BENCH"
+            final_lineup = new_lineup if new_roster == "ACTIVE" else "BN"
             cursor.execute("""
                 UPDATE team_rosters
                 SET fantasy_team = ?, roster_slot = ?, lineup_slot = ?,
@@ -972,9 +1049,9 @@ def api_admin_player(payload: PlayerAdminPayload):
     pos_str = ",".join(pos_list)
     primary_pos = pos_list[0] if pos_list else "DH"
     roster_slot = payload.roster_slot.upper() if payload.roster_slot.upper() in VALID_SLOTS else "ACTIVE"
-    lineup_slot = (payload.lineup_slot or "BENCH").upper()
+    lineup_slot = normalize_lineup_slot(payload.lineup_slot)
     if roster_slot != "ACTIVE" or lineup_slot not in ALL_ACTIVE_LINEUP_SLOTS:
-        lineup_slot = "BENCH"
+        lineup_slot = "BN"
 
     conn = get_db()
     cursor = conn.cursor()
@@ -1040,9 +1117,12 @@ def api_seed_winter_test(payload: SeedWinterPayload):
     team = payload.team if payload.team in ALL_AVAILABLE_TEAMS else "台灣海洋"
     count = max(1, min(60, int(payload.count or 25)))
     sample_plan = [
-        ("C", "C"), ("1B", "1B"), ("2B", "2B"), ("3B", "3B"),
-        ("SS", "SS"), ("OF", "OF"), ("DH", "DH"),
-        ("SP", "SP1"), ("SP", "SP2"), ("RP", "RP1"), ("RP", "RP2"),
+        ("SP", "SP1"), ("SP", "SP2"), ("SP", "SP3"),
+        ("P", "P1"), ("P", "P2"), ("P", "P3"),
+        ("CP", "CP1"), ("CP", "CP2"), ("CP", "CP3"),
+        ("DH", "DH1"), ("DH", "DH2"),
+        ("C", "C"), ("1B", "1B"), ("2B", "2B"), ("3B", "3B"), ("SS", "SS"),
+        ("OF", "OF1"), ("OF", "OF2"), ("OF", "OF3"),
     ]
     target_date = (payload.stat_date or "").strip() or date.today().isoformat()
 
@@ -1058,7 +1138,7 @@ def api_seed_winter_test(payload: SeedWinterPayload):
             pname = f"{team}球員{i:02d}"
             pos, assigned_lineup = sample_plan[(i - 1) % len(sample_plan)]
             r_slot = "ACTIVE" if i <= MAX_ACTIVE_ROSTER else "MINORS"
-            l_slot = assigned_lineup if (r_slot == "ACTIVE" and i <= len(sample_plan)) else "BENCH"
+            l_slot = assigned_lineup if (r_slot == "ACTIVE" and i <= len(sample_plan)) else "BN"
 
             cursor.execute("""
                 INSERT INTO players (player_id, name, real_team, position, positions)
@@ -1082,8 +1162,9 @@ def api_seed_winter_test(payload: SeedWinterPayload):
             """, (pid, team, r_slot, l_slot, now_iso))
 
             if payload.with_stats and l_slot in SCORING_LINEUP_SLOTS:
-                if pos in {"SP", "RP"}:
-                    is_sp = pos == "SP"
+                if pos in {"SP", "P", "CP"}:
+                    is_sp = l_slot.startswith("SP")
+                    is_cp = l_slot.startswith("CP")
                     cursor.execute("""
                         INSERT INTO player_daily_stats (
                             player_id, stat_date, ip, er, k, w, hld, sv, pitch_h, pitch_bb
@@ -1097,9 +1178,9 @@ def api_seed_winter_test(payload: SeedWinterPayload):
                         6.0 if is_sp else 1.0,
                         2 if is_sp else 0,
                         6 if is_sp else 2,
-                        1 if i == 8 else 0,
-                        1 if i == 10 else 0,
-                        1 if i == 11 else 0,
+                        1 if i == 1 else 0,
+                        1 if i == 4 else 0,
+                        1 if is_cp and i == 7 else 0,
                         5 if is_sp else 1,
                         2 if is_sp else 0,
                     ))
@@ -1120,9 +1201,9 @@ def api_seed_winter_test(payload: SeedWinterPayload):
                         1 if i % 4 == 0 else 0,
                         0, 0,
                         2 if i % 2 == 0 else 1,
-                        1 if i in {2, 5} else 0,
-                        1 if i in {2, 6} else 0,
-                        4 if i in {2, 6} else 2,
+                        1 if i in {12, 15} else 0,
+                        1 if i in {10, 14} else 0,
+                        4 if i in {10, 14} else 2,
                     ))
                 seeded_stats += 1
 
