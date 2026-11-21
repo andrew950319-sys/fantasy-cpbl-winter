@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from cpbl_fetcher import import_cpbl_game
+from cpbl_fetcher import import_cpbl_game, sync_awb_schedule
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
@@ -29,7 +29,7 @@ AUTO_FETCH_INTERVAL_SEC = int(os.environ.get("AUTO_FETCH_INTERVAL_SEC", "600"))
 auto_fetch_lock = threading.Lock()
 auto_fetch_status = {
     "last_run_at": "",
-    "last_summary": "尚未執行自動抓數",
+    "last_summary": "尚未執行自動抓賽程／抓數",
 }
 
 
@@ -61,6 +61,23 @@ SCHEDULE_WEEKS = [
     },
 ]
 SCHEDULE_WEEK_MAP = {w["key"]: w for w in SCHEDULE_WEEKS}
+
+
+def get_default_week_for_today(today_str: str | None = None) -> str:
+    d_str = today_str or date.today().isoformat()
+    if d_str <= "2026-11-29":
+        return "2026-11-23_2026-11-29"
+    return "2026-11-30_2026-12-03"
+
+
+def get_default_stat_date(available_dates: list[str], today_str: str | None = None) -> str:
+    d_str = today_str or date.today().isoformat()
+    if d_str in available_dates:
+        return d_str
+    if d_str <= "2026-11-23" and "2026-11-23" in available_dates:
+        return "2026-11-23"
+    return "ALL"
+
 
 TEAM_CODES = {
     "樂天桃猿": "rakuten",
@@ -186,7 +203,7 @@ class PlayerAdminPayload(BaseModel):
 
 class CpblImportPayload(BaseModel):
     year: str = "2026"
-    kind_code: str = "A"
+    kind_code: str = "P"
     game_sno: str
     stat_date: str = ""
     week_key: str = ""
@@ -199,7 +216,7 @@ class ScheduleEntryPayload(BaseModel):
     away_team: str = "台灣山林"
     home_team: str = "台灣海洋"
     year: str = "2026"
-    kind_code: str = "A"
+    kind_code: str = "P"
     game_sno: str = ""
 
 
@@ -368,11 +385,19 @@ def init_stats_and_sample_data():
 init_stats_and_sample_data()
 
 
-def run_auto_fetch_due_games(force_all: bool = False) -> dict:
+def run_auto_fetch_due_games(force_all: bool = False, sync_schedule: bool = True) -> dict:
     with auto_fetch_lock:
         now_dt = datetime.now()
         today_str = now_dt.strftime("%Y-%m-%d")
         now_iso = now_dt.isoformat(timespec="seconds")
+
+        schedule_msg = ""
+        if sync_schedule:
+            try:
+                sch_res = sync_awb_schedule(year="2026", kind_code="P", db_path="fantasy_league.db")
+                schedule_msg = f"同步賽程 {sch_res.get('synced_count', 0)} 場"
+            except Exception as exc:
+                schedule_msg = f"賽程同步略過({exc})"
 
         conn = get_db()
         cursor = conn.cursor()
@@ -397,7 +422,7 @@ def run_auto_fetch_due_games(force_all: bool = False) -> dict:
             due_games.append(g)
 
         if not due_games:
-            summary = f"無到期需抓數的場次（已檢查 {len(games)} 筆賽程）"
+            summary = f"{schedule_msg}｜無到期需抓數的場次（已檢查 {len(games)} 筆賽程）"
             auto_fetch_status["last_run_at"] = now_iso
             auto_fetch_status["last_summary"] = summary
             return {"ok": True, "fetched_count": 0, "errors": [], "summary": summary}
@@ -409,7 +434,7 @@ def run_auto_fetch_due_games(force_all: bool = False) -> dict:
                 import_cpbl_game(
                     db_path="fantasy_league.db",
                     year=(g.get("year") or "2026").strip(),
-                    kind_code=(g.get("kind_code") or "A").strip(),
+                    kind_code=(g.get("kind_code") or "P").strip(),
                     game_sno=g["game_sno"].strip(),
                 )
                 fetched_count += 1
@@ -425,7 +450,7 @@ def run_auto_fetch_due_games(force_all: bool = False) -> dict:
             except Exception as exc:
                 errors.append(f"{g['game_date']} #{g['game_sno']}: {exc}")
 
-        summary = f"成功抓取 {fetched_count}/{len(due_games)} 場" + (f"（{len(errors)} 筆失敗）" if errors else "")
+        summary = f"{schedule_msg}｜抓成績 {fetched_count}/{len(due_games)} 場" + (f"（{len(errors)} 筆失敗）" if errors else "")
         auto_fetch_status["last_run_at"] = now_iso
         auto_fetch_status["last_summary"] = summary
         return {
@@ -440,7 +465,7 @@ def run_auto_fetch_due_games(force_all: bool = False) -> dict:
 def _auto_fetch_worker():
     while AUTO_FETCH_ENABLED:
         try:
-            run_auto_fetch_due_games(force_all=False)
+            run_auto_fetch_due_games(force_all=False, sync_schedule=True)
         except Exception:
             pass
         time.sleep(max(30, AUTO_FETCH_INTERVAL_SEC))
@@ -967,16 +992,22 @@ def read_matchup(
     request: Request,
     code: str = None,
     opp: str = None,
-    stat_date: str = "ALL",
-    week: str = "ALL",
+    stat_date: str = None,
+    week: str = None,
     error: str = None,
 ):
     clear_free_agent_players()
     logged_team = resolve_logged_team(request, code)
     available_dates = get_available_dates()
-    selected_week = week if week in SCHEDULE_WEEK_MAP else "ALL"
-    selected_date = stat_date if (stat_date == "ALL" or stat_date in available_dates) else "ALL"
-    schedule_games = get_schedule_games(selected_week if selected_week != "ALL" else None)
+    today_str = date.today().isoformat()
+
+    selected_week = week if week in SCHEDULE_WEEK_MAP else get_default_week_for_today(today_str)
+    if stat_date:
+        selected_date = stat_date if (stat_date == "ALL" or stat_date in available_dates) else "ALL"
+    else:
+        selected_date = get_default_stat_date(available_dates, today_str)
+
+    schedule_games = get_schedule_games(selected_week)
 
     grouped_players = {"ACTIVE": [], "MINORS": [], "IL": [], "SPECIAL": [], "FA": []}
     categories = []
@@ -1258,7 +1289,7 @@ def api_add_schedule(payload: ScheduleEntryPayload):
         """, (
             gkey,
             (payload.year or "2026").strip(),
-            (payload.kind_code or "A").strip(),
+            (payload.kind_code or "P").strip(),
             sno,
             gdate,
             (payload.start_time or "").strip(),
@@ -1279,7 +1310,7 @@ def api_run_auto_fetch():
     if denied:
         return denied
 
-    res = run_auto_fetch_due_games(force_all=False)
+    res = run_auto_fetch_due_games(force_all=False, sync_schedule=True)
     return JSONResponse(res)
 
 
@@ -1372,7 +1403,7 @@ def api_seed_winter_test(payload: SeedWinterPayload):
         ("C", "C"), ("1B", "1B"), ("2B", "2B"), ("3B", "3B"), ("SS", "SS"),
         ("OF", "OF1"), ("OF", "OF2"), ("OF", "OF3"),
     ]
-    target_date = (payload.stat_date or "").strip() or date.today().isoformat()
+    target_date = (payload.stat_date or "").strip() or "2026-11-23"
 
     conn = get_db()
     cursor = conn.cursor()

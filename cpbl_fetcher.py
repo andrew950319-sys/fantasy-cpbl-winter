@@ -9,6 +9,7 @@ from typing import Any
 
 DB_PATH = "fantasy_league.db"
 AWB_BASE_URL = "https://awb.cpbl.com.tw"
+AWB_SCHEDULE_URL = "https://awb.cpbl.com.tw/schedule"
 AWB_LIVE_URL = "https://awb.cpbl.com.tw/box/getlive"
 AWB_KIND_CODES = {"P", "AWB", "WINTER"}
 ALLOWED_WINTER_TEAMS = {"台灣海洋", "台灣山林"}
@@ -45,11 +46,101 @@ def build_cpbl_opener() -> urllib.request.OpenerDirector:
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         ),
-        ("Accept", "application/json, text/javascript, */*; q=0.01"),
+        ("Accept", "text/html,application/json, text/javascript, */*; q=0.01"),
         ("Accept-Language", "zh-TW,zh;q=0.9,en;q=0.8"),
         ("X-Requested-With", "XMLHttpRequest"),
     ]
     return opener
+
+
+def _normalize_date_str(raw_date: str, fallback_year: str | int) -> str:
+    s = (raw_date or "").strip()
+    m_full = re.search(r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})", s)
+    if m_full:
+        y, mo, da = m_full.groups()
+        return f"{int(y):04d}-{int(mo):02d}-{int(da):02d}"
+    m_short = re.search(r"\b(\d{1,2})[/-](\d{1,2})\b", s)
+    if m_short:
+        mo, da = m_short.groups()
+        yr = int(fallback_year)
+        if int(mo) == 12 and yr == 2026:
+            yr = 2026
+        return f"{yr:04d}-{int(mo):02d}-{int(da):02d}"
+    return ""
+
+
+def _resolve_week_key_for_date(gdate: str) -> str:
+    if "2026-11-23" <= gdate <= "2026-11-29":
+        return "2026-11-23_2026-11-29"
+    if "2026-11-30" <= gdate <= "2026-12-03":
+        return "2026-11-30_2026-12-03"
+    return ""
+
+
+def fetch_awb_schedule(
+    year: str | int = "2026",
+    kind_code: str = "P",
+    opener: urllib.request.OpenerDirector | None = None,
+) -> list[dict[str, str]]:
+    """抓取冬盟官網賽程頁並解析場次（日期、場次編號、客隊、主隊、開賽時間）。"""
+    if opener is None:
+        opener = build_cpbl_opener()
+
+    url = f"{AWB_SCHEDULE_URL}?year={year}&kindCode={kind_code}"
+    req = urllib.request.Request(url, method="GET")
+    with opener.open(req, timeout=20) as resp:
+        html = resp.read().decode("utf-8", errors="replace")
+
+    games: list[dict[str, str]] = []
+    seen_keys: set[str] = set()
+
+    # 1. 嘗試從 HTML 中擷取包含 gameSno 與日期的連結或屬性
+    for m in re.finditer(
+        r"(?:gameSno|GameSno)=([0-9]+)", html, flags=re.IGNORECASE
+    ):
+        sno = m.group(1).strip()
+        start_idx = max(0, m.start() - 400)
+        end_idx = min(len(html), m.end() + 400)
+        window_text = re.sub(r"<[^>]+>", " ", html[start_idx:end_idx])
+        window_text = re.sub(r"\s+", " ", window_text).strip()
+
+        gdate = _normalize_date_str(window_text, year)
+        if not gdate:
+            continue
+
+        t_match = re.search(r"\b([012]?\d:[0-5]\d)\b", window_text)
+        start_time = f"{gdate} {t_match.group(1)}:00" if t_match else ""
+
+        away_team = ""
+        home_team = ""
+        for team_cand in ("台灣山林", "台灣海洋", "日職聯隊", "日本社會人", "韓職聯隊", "大學明星"):
+            if team_cand in window_text:
+                if not away_team:
+                    away_team = team_cand
+                elif team_cand != away_team and not home_team:
+                    home_team = team_cand
+
+        wkey = _resolve_week_key_for_date(gdate)
+        gkey = f"{year}_{kind_code}_{sno}"
+        if gkey in seen_keys:
+            continue
+        seen_keys.add(gkey)
+        games.append(
+            {
+                "game_key": gkey,
+                "year": str(year),
+                "kind_code": str(kind_code),
+                "game_sno": sno,
+                "game_date": gdate,
+                "start_time": start_time,
+                "away_team": away_team,
+                "home_team": home_team,
+                "week_key": wkey,
+            }
+        )
+
+    games.sort(key=lambda x: (x["game_date"], int(x["game_sno"]) if x["game_sno"].isdigit() else 0))
+    return games
 
 
 def _parse_awb_ip_from_row(row: dict[str, Any]) -> float:
@@ -452,9 +543,18 @@ def _ensure_tables_for_fetcher(cur: sqlite3.Cursor) -> None:
             start_time TEXT DEFAULT '',
             away_team TEXT DEFAULT '',
             home_team TEXT DEFAULT '',
+            week_key TEXT DEFAULT '',
+            last_fetched_at TEXT DEFAULT '',
             updated_at TEXT
         )
     """)
+    cur.execute("PRAGMA table_info(cpbl_games)")
+    g_cols = {r[1] for r in cur.fetchall()}
+    if "week_key" not in g_cols:
+        cur.execute("ALTER TABLE cpbl_games ADD COLUMN week_key TEXT DEFAULT ''")
+    if "last_fetched_at" not in g_cols:
+        cur.execute("ALTER TABLE cpbl_games ADD COLUMN last_fetched_at TEXT DEFAULT ''")
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS player_game_stats (
             player_id TEXT NOT NULL,
@@ -481,6 +581,60 @@ def _ensure_tables_for_fetcher(cur: sqlite3.Cursor) -> None:
             PRIMARY KEY (player_id, stat_date, game_key)
         )
     """)
+
+
+def sync_awb_schedule(
+    year: str | int = "2026",
+    kind_code: str = "P",
+    db_path: str = DB_PATH,
+) -> dict[str, Any]:
+    """自動抓冬盟賽程並寫入 cpbl_games（保留既有 week_key 或依日期自動歸入第1/第2週）。"""
+    fetched_games = fetch_awb_schedule(year=year, kind_code=kind_code)
+    conn = sqlite3.connect(db_path, timeout=30)
+    cur = conn.cursor()
+    _ensure_tables_for_fetcher(cur)
+
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    synced_count = 0
+    week_matched_count = 0
+
+    for g in fetched_games:
+        wkey = g.get("week_key") or _resolve_week_key_for_date(g["game_date"])
+        if wkey:
+            week_matched_count += 1
+        cur.execute("""
+            INSERT INTO cpbl_games (
+                game_key, year, kind_code, game_sno, game_date, start_time, away_team, home_team, week_key, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(game_key) DO UPDATE SET
+                game_date = excluded.game_date,
+                start_time = CASE WHEN excluded.start_time != '' THEN excluded.start_time ELSE cpbl_games.start_time END,
+                away_team = CASE WHEN excluded.away_team != '' THEN excluded.away_team ELSE cpbl_games.away_team END,
+                home_team = CASE WHEN excluded.home_team != '' THEN excluded.home_team ELSE cpbl_games.home_team END,
+                week_key = CASE WHEN cpbl_games.week_key != '' THEN cpbl_games.week_key ELSE excluded.week_key END,
+                updated_at = excluded.updated_at
+        """, (
+            g["game_key"],
+            g["year"],
+            g["kind_code"],
+            g["game_sno"],
+            g["game_date"],
+            g["start_time"],
+            g["away_team"],
+            g["home_team"],
+            wkey,
+            now_iso,
+        ))
+        synced_count += 1
+
+    conn.commit()
+    conn.close()
+    return {
+        "ok": True,
+        "synced_count": synced_count,
+        "week_matched_count": week_matched_count,
+        "games": fetched_games,
+    }
 
 
 def _sync_daily_stats_from_games(cur: sqlite3.Cursor, player_ids: list[str], dates: set[str]) -> None:
@@ -546,7 +700,6 @@ def save_parsed_stats(
         name_to_id = {str(row[1]).strip(): row[0] for row in cur.fetchall() if row[1]}
         name_to_team = {}
 
-    # 冬盟模式僅保留「台灣海洋」與「台灣山林」球員，其餘四隊略過
     if awb_mode:
         filtered_parsed: dict[str, dict[str, Any]] = {}
         for name, stats in parsed_by_name.items():
@@ -558,10 +711,21 @@ def save_parsed_stats(
         parsed_by_name = filtered_parsed
 
     if game_meta:
+        wkey = _resolve_week_key_for_date(game_meta.get("game_date", ""))
         cur.execute("""
-            INSERT OR REPLACE INTO cpbl_games (
-                game_key, year, kind_code, game_sno, game_date, start_time, away_team, home_team, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO cpbl_games (
+                game_key, year, kind_code, game_sno, game_date, start_time, away_team, home_team, week_key, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(game_key) DO UPDATE SET
+                year = excluded.year,
+                kind_code = excluded.kind_code,
+                game_sno = excluded.game_sno,
+                game_date = excluded.game_date,
+                start_time = CASE WHEN excluded.start_time != '' THEN excluded.start_time ELSE cpbl_games.start_time END,
+                away_team = CASE WHEN excluded.away_team != '' THEN excluded.away_team ELSE cpbl_games.away_team END,
+                home_team = CASE WHEN excluded.home_team != '' THEN excluded.home_team ELSE cpbl_games.home_team END,
+                week_key = CASE WHEN cpbl_games.week_key != '' THEN cpbl_games.week_key ELSE excluded.week_key END,
+                updated_at = excluded.updated_at
         """, (
             game_key,
             game_meta.get("year", ""),
@@ -571,6 +735,7 @@ def save_parsed_stats(
             game_meta.get("start_time", ""),
             game_meta.get("away_team", ""),
             game_meta.get("home_team", ""),
+            wkey,
             datetime.now().isoformat(timespec="seconds"),
         ))
 

@@ -94,16 +94,16 @@
       <div>
         <label class="text-xs text-slate-400 mr-2">賽程週次</label>
         <select name="week" onchange="this.form.submit()" class="bg-slate-800 border border-slate-700 text-slate-100 rounded-lg px-3 py-1.5 text-sm">
-          <option value="ALL" {% if selected_week == 'ALL' %}selected{% endif %}>全部週次（ALL）</option>
           {% for w in schedule_weeks %}
           <option value="{{ w.key }}" {% if selected_week == w.key %}selected{% endif %}>{{ w.label }}</option>
           {% endfor %}
+          <option value="ALL" {% if selected_week == 'ALL' %}selected{% endif %}>全部週次（ALL）</option>
         </select>
       </div>
       <div>
         <label class="text-xs text-slate-400 mr-2">統計日期</label>
         <select name="stat_date" onchange="this.form.submit()" class="bg-slate-800 border border-slate-700 text-slate-100 rounded-lg px-3 py-1.5 text-sm">
-          <option value="ALL" {% if selected_date == 'ALL' %}selected{% endif %}>全部累積（ALL）</option>
+          <option value="ALL" {% if selected_date == 'ALL' %}selected{% endif %}>本週累積（ALL）</option>
           {% for d in available_dates %}
           <option value="{{ d }}" {% if selected_date == d %}selected{% endif %}>{{ d }}</option>
           {% endfor %}
@@ -325,20 +325,20 @@
     </div>
 
     {% if enable_admin %}
-    <!-- 賽程登錄（11/23～11/29 與 11/30～12/3）+ 自動抓數狀態 -->
+    <!-- 賽程登錄與自動抓賽程／抓數 -->
     <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h3 class="text-sm font-semibold text-slate-100">賽程登錄與自動抓數（11/23～11/29、11/30～12/3）</h3>
+          <h3 class="text-sm font-semibold text-slate-100">賽程與自動抓數（第1週 11/23～11/29、第2週 11/30～12/3）</h3>
           <p class="text-[11px] text-slate-400 mt-0.5">
-            自動抓數：{{ '已啟用' if auto_fetch_enabled else '已停用' }}（每 {{ auto_fetch_interval_sec }} 秒檢查已到期場次）｜
+            自動排程：{{ '已啟用' if auto_fetch_enabled else '已停用' }}（每 {{ auto_fetch_interval_sec }} 秒同步賽程並抓到期場次）｜
             最近狀態：{{ auto_fetch_status.last_summary }}{% if auto_fetch_status.last_run_at %}（{{ auto_fetch_status.last_run_at }}）{% endif %}
           </p>
         </div>
         <div class="flex items-center gap-2">
-          <span class="text-xs text-slate-400">已登錄場次：{{ schedule_games|length }} 場</span>
+          <span class="text-xs text-slate-400">本週場次：{{ schedule_games|length }} 場</span>
           <button onclick="runAutoFetchNow()" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700">
-            立即自動掃描抓取
+            立即自動抓賽程與成績
           </button>
         </div>
       </div>
@@ -347,7 +347,7 @@
           <label class="block text-slate-400 mb-1">週次區間</label>
           <select id="schWeek" class="w-full bg-slate-800 border border-slate-700 text-slate-100 rounded px-2.5 py-1.5">
             {% for w in schedule_weeks %}
-            <option value="{{ w.key }}">{{ w.label }}</option>
+            <option value="{{ w.key }}" {% if selected_week == w.key %}selected{% endif %}>{{ w.label }}</option>
             {% endfor %}
           </select>
         </div>
@@ -364,12 +364,12 @@
           <input id="schHome" value="台灣海洋" class="w-full bg-slate-800 border border-slate-700 text-slate-100 rounded px-2.5 py-1.5" />
         </div>
         <div>
-          <label class="block text-slate-400 mb-1">場次編號（需填數字才會自動抓）</label>
+          <label class="block text-slate-400 mb-1">場次編號</label>
           <input id="schSno" placeholder="例如 274" class="w-full bg-slate-800 border border-slate-700 text-slate-100 rounded px-2.5 py-1.5" />
         </div>
       </div>
       <button onclick="saveSchedule()" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700">
-        加入賽程
+        手動補登賽程
       </button>
       <p id="schMsg" class="text-xs text-emerald-400"></p>
       {% if schedule_games %}
@@ -397,7 +397,7 @@
           </div>
           <div>
             <label class="block text-slate-400 mb-1">賽事碼 (kind_code)</label>
-            <input id="cpblKind" value="A" class="w-full bg-slate-800 border border-slate-700 text-slate-100 rounded px-2.5 py-1.5" />
+            <input id="cpblKind" value="P" class="w-full bg-slate-800 border border-slate-700 text-slate-100 rounded px-2.5 py-1.5" />
           </div>
           <div>
             <label class="block text-slate-400 mb-1">場次編號 (game_sno)</label>
@@ -552,7 +552,7 @@
     async function runAutoFetchNow() {
       const msg = document.getElementById("schMsg");
       msg.className = "text-xs text-slate-300";
-      msg.textContent = "正在掃描到期賽程並抓取成績...";
+      msg.textContent = "正在自動抓賽程並掃描到期場次成績...";
       const res = await fetch("/api/admin/auto-fetch/run", {method: "POST"});
       const data = await res.json();
       if (!data.ok) {
