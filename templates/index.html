@@ -1,32 +1,32 @@
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html lang="zh-Hant">
 <head>
-    <meta charset="UTF-8">
-    <title>CPBL Fantasy 聯盟</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+  <meta charset="UTF-8" />
+  <title>CPBL Fantasy 首頁</title>
+  <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-slate-100 text-slate-800 p-6">
-    <div class="max-w-5xl mx-auto bg-white p-6 rounded-xl shadow-lg border border-slate-200">
+<body class="bg-slate-950 text-slate-100 min-h-screen p-4 md:p-8">
+  <div class="max-w-5xl mx-auto space-y-6">
+    <nav class="flex flex-wrap items-center gap-2 bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-xs">
+      <a href="/" class="px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-medium">
+        首頁
+      </a>
+      <a href="/roster" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium">
+        球員名單
+      </a>
+      <a href="/matchup" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium">
+        對戰與調度中心
+      </a>
+    </nav>
 
-        <!-- 頂部導覽列 -->
-        <div class="flex justify-between items-center mb-6 pb-4 border-b border-slate-200">
-            <h1 class="text-xl font-black text-slate-900 tracking-wider">⚾ CPBL FANTASY 聯盟</h1>
-            <div class="flex gap-2">
-                <a href="/" class="px-4 py-2 rounded-lg text-sm font-bold bg-slate-900 text-white">聯盟首頁</a>
-                <a href="/roster" class="px-4 py-2 rounded-lg text-sm font-bold bg-slate-200 text-slate-700 hover:bg-slate-300">球隊名單</a>
-                <a href="/matchup" class="px-4 py-2 rounded-lg text-sm font-bold bg-slate-200 text-slate-700 hover:bg-slate-300">對戰與調度</a>
-            </div>
-        </div>
-
-        <!-- 首頁主視覺區（無王朝、僅保留單一按鈕） -->
-        <div class="py-16 text-center">
-            <h2 class="text-3xl font-black mb-3 text-slate-800">CPBL FANTASY 聯盟</h2>
-            <p class="text-slate-500 mb-8 text-sm">4 隊每週 12 項對決與一二軍陣容系統</p>
-            <a href="/roster" class="inline-block bg-blue-600 text-white px-7 py-3 rounded-lg font-bold shadow hover:bg-blue-700 transition">
-                前往球隊名單
-            </a>
-        </div>
-
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
+      <h1 class="text-2xl font-bold text-white">CPBL Fantasy 聯盟中心</h1>
+      <div class="flex flex-wrap gap-3 pt-2">
+        <a href="/matchup" class="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-sm font-medium">
+          前往對戰與調度中心
+        </a>
+      </div>
     </div>
+  </div>
 </body>
 </html>

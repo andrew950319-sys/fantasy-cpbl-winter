@@ -178,14 +178,6 @@ def ensure_extended_schema(cursor):
     if "real_team" not in p_cols:
         cursor.execute("ALTER TABLE players ADD COLUMN real_team TEXT DEFAULT ''")
 
-    now_iso = datetime.now().isoformat(timespec="seconds")
-    cursor.execute("""
-        INSERT OR IGNORE INTO team_rosters (player_id, fantasy_team, roster_slot, lineup_slot, slot_changed_at, status_reason)
-        SELECT player_id, '', 'RELEASED', 'BENCH', ?, '自由球員池'
-        FROM players
-        WHERE player_id NOT IN (SELECT player_id FROM team_rosters)
-    """, (now_iso,))
-
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS cpbl_games (
             game_key TEXT PRIMARY KEY,
@@ -205,6 +197,26 @@ def ensure_extended_schema(cursor):
         SET lineup_slot = 'BENCH'
         WHERE roster_slot = 'ACTIVE' AND (lineup_slot IS NULL OR lineup_slot = '')
     """)
+
+
+def clear_free_agent_players():
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        ensure_extended_schema(cursor)
+        cursor.execute("""
+            SELECT player_id FROM team_rosters
+            WHERE roster_slot = 'RELEASED' OR fantasy_team IS NULL OR TRIM(fantasy_team) = ''
+        """)
+        fa_pids = [r["player_id"] for r in cursor.fetchall()]
+        if fa_pids:
+            placeholders = ",".join("?" for _ in fa_pids)
+            cursor.execute(f"DELETE FROM player_daily_stats WHERE player_id IN ({placeholders})", fa_pids)
+            cursor.execute(f"DELETE FROM team_rosters WHERE player_id IN ({placeholders})", fa_pids)
+            cursor.execute(f"DELETE FROM players WHERE player_id IN ({placeholders})", fa_pids)
+            conn.commit()
+    finally:
+        conn.close()
 
 
 def init_stats_and_sample_data():
@@ -616,12 +628,6 @@ def get_team_players_with_stats(fantasy_team: str, date_filter: str = "ALL"):
         [fantasy_team],
         date_filter,
     )
-    free_agents = _query_players_block(
-        cursor,
-        "r.roster_slot = 'RELEASED' OR r.fantasy_team IS NULL OR r.fantasy_team = ''",
-        [],
-        date_filter,
-    )
     conn.close()
 
     grouped = {
@@ -629,11 +635,15 @@ def get_team_players_with_stats(fantasy_team: str, date_filter: str = "ALL"):
         "MINORS": [],
         "IL": [],
         "SPECIAL": [],
-        "FA": free_agents,
+        "FA": [],
     }
     for item in rows:
         if item["slot"] in grouped:
             grouped[item["slot"]].append(item)
+
+    grouped["ACTIVE"].sort(
+        key=lambda x: (0 if x["is_scoring"] else 1, x["player_id"])
+    )
     return grouped
 
 
@@ -649,7 +659,10 @@ def read_home(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"active_page": "home"}
+        context={
+            "active_page": "home",
+            "enable_admin": ENABLE_ADMIN,
+        }
     )
 
 
@@ -689,6 +702,7 @@ def read_roster(request: Request, team: str = "樂天桃猿"):
         name="roster.html",
         context={
             "active_page": "roster",
+            "enable_admin": ENABLE_ADMIN,
             "teams": ALL_AVAILABLE_TEAMS,
             "current_team": team,
             "active_players": active_players,
@@ -701,6 +715,7 @@ def read_roster(request: Request, team: str = "樂天桃猿"):
 
 @app.get("/matchup")
 def read_matchup(request: Request, code: str = None, opp: str = None, stat_date: str = "ALL", error: str = None):
+    clear_free_agent_players()
     logged_team = resolve_logged_team(request, code)
     available_dates = get_available_dates()
     selected_date = stat_date if (stat_date == "ALL" or stat_date in available_dates) else "ALL"
@@ -776,6 +791,7 @@ def read_matchup(request: Request, code: str = None, opp: str = None, stat_date:
         name="matchup.html",
         context={
             "active_page": "matchup",
+            "enable_admin": ENABLE_ADMIN,
             "teams": ALL_AVAILABLE_TEAMS,
             "other_teams": other_teams,
             "logged_team": logged_team,
@@ -924,7 +940,7 @@ def api_lineup_move(request: Request, payload: LineupMovePayload):
             cursor.execute("""
                 UPDATE team_rosters
                 SET fantasy_team = '', roster_slot = 'RELEASED', lineup_slot = 'BENCH',
-                    slot_changed_at = ?, status_reason = '釋出至自由球員池'
+                    slot_changed_at = ?, status_reason = '釋出至自由球員'
                 WHERE player_id = ?
             """, (now_iso, payload.player_id))
         else:

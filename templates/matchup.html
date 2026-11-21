@@ -8,6 +8,26 @@
 <body class="bg-slate-950 text-slate-100 min-h-screen p-4 md:p-6">
   <div class="max-w-7xl mx-auto space-y-6">
 
+    <!-- 跨頁導覽列 -->
+    <nav class="flex flex-wrap items-center justify-between gap-3 bg-slate-900/90 border border-slate-800 rounded-xl px-4 py-2.5 text-xs">
+      <div class="flex flex-wrap items-center gap-2">
+        <a href="/" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium">
+          回首頁
+        </a>
+        <a href="/roster" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium">
+          球員名單
+        </a>
+        <a href="/matchup" class="px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-medium">
+          對戰與調度中心
+        </a>
+      </div>
+      {% if logged_team %}
+      <div class="text-slate-400">
+        目前操作隊伍：<span class="text-white font-semibold">{{ logged_team }}</span>
+      </div>
+      {% endif %}
+    </nav>
+
     <!-- 頂部列 -->
     <div class="flex flex-wrap items-center justify-between gap-4 bg-slate-900 border border-slate-800 rounded-xl p-4">
       <div>
@@ -132,10 +152,10 @@
       </table>
     </div>
 
-    <!-- 調度區：一軍（先發16槽 + 板凳）與 二軍/傷兵/特殊/自由球員池 -->
+    <!-- 調度區：一軍（先發算分在前 + 板凳在後）與 二軍/傷兵/特殊/自由球員 -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
-      <!-- 左側：一軍名單（ACTIVE：先發算分槽位 + 板凳） -->
+      <!-- 左側：一軍名單（ACTIVE：先發算分槽位在前 + 板凳在後） -->
       <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-4">
         <div class="flex items-center justify-between">
           <h2 class="text-base font-semibold text-white">
@@ -148,7 +168,7 @@
         </div>
 
         <p class="text-xs text-slate-400">
-          先發槽位（野手 C/1B/2B/3B/SS/OF/DH、投手 SP1~3/P1~3/RP1~3）會算分；選「BENCH」為板凳（不算分）。
+          上方為「先發會算成績（16 槽）」、下方為「板凳（BENCH，不算分）」；先發槽位：野手 C/1B/2B/3B/SS/OF/DH、投手 SP1~3/P1~3/RP1~3。
         </p>
 
         <div class="divide-y divide-slate-800 max-h-[580px] overflow-y-auto pr-1">
@@ -161,7 +181,7 @@
               <span class="ml-1 text-[11px] text-slate-400">[{{ p.real_team }}]</span>
               {% endif %}
               {% if p.is_scoring %}
-              <span class="ml-1 px-1.5 py-0.5 rounded bg-emerald-900/70 text-emerald-300">算分:{{ p.lineup_slot }}</span>
+              <span class="ml-1 px-1.5 py-0.5 rounded bg-emerald-900/70 text-emerald-300">先發算分:{{ p.lineup_slot }}</span>
               {% else %}
               <span class="ml-1 px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">板凳(不算分)</span>
               {% endif %}
@@ -205,7 +225,7 @@
         </div>
       </div>
 
-      <!-- 右側：二軍 / 傷兵 / 特殊名單 / 自由球員池 -->
+      <!-- 右側：二軍 / 傷兵 / 特殊名單 / 自由球員 -->
       <div class="space-y-4">
         <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
           <h3 class="text-sm font-semibold text-amber-300 mb-2">二軍（MINORS：{{ minors_players|length }} 人）</h3>
@@ -273,10 +293,10 @@
           </div>
         </div>
 
-        <!-- 自由球員池（FA -> 新註冊進一軍） -->
+        <!-- 自由球員 -->
         <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
           <div class="flex items-center justify-between mb-2">
-            <h3 class="text-sm font-semibold text-cyan-300">自由球員池（FA：{{ fa_players|length }} 人）</h3>
+            <h3 class="text-sm font-semibold text-cyan-300">自由球員（FA：{{ fa_players|length }} 人）</h3>
             <span class="text-[11px] text-slate-400">點「新註冊」會直接註冊進一軍（ACTIVE）</span>
           </div>
           <div class="divide-y divide-slate-800 max-h-48 overflow-y-auto">
@@ -295,7 +315,7 @@
               </div>
             </div>
             {% else %}
-            <p class="text-xs text-slate-500">目前自由球員池沒有待註冊球員</p>
+            <p class="text-xs text-slate-500">目前沒有自由球員</p>
             {% endfor %}
           </div>
         </div>
@@ -341,7 +361,7 @@
           <div>
             <label class="block text-slate-400 mb-1">Fantasy 所屬隊伍</label>
             <select id="admFantasyTeam" class="w-full bg-slate-800 border border-slate-700 rounded px-2.5 py-1.5">
-              <option value="">（放入自由球員池 FA）</option>
+              <option value="">（放入自由球員 FA）</option>
               {% for t in teams %}
               <option value="{{ t }}" {% if t == logged_team %}selected{% endif %}>{{ t }}</option>
               {% endfor %}
@@ -358,7 +378,7 @@
               <option value="MINORS">MINORS（二軍）</option>
               <option value="IL">IL（傷兵）</option>
               <option value="SPECIAL">SPECIAL（特殊）</option>
-              <option value="RELEASED">RELEASED（自由球員池）</option>
+              <option value="RELEASED">RELEASED（自由球員）</option>
             </select>
           </div>
         </div>
@@ -417,7 +437,7 @@
     }
 
     async function releasePlayer(playerId, playerName) {
-      if (!confirm(`確定要將 ${playerName} 釋出至自由球員池（FA）嗎？`)) return;
+      if (!confirm(`確定要將 ${playerName} 釋出至自由球員（FA）嗎？`)) return;
       await movePlayer(playerId, "RELEASED", "BENCH");
     }
 
