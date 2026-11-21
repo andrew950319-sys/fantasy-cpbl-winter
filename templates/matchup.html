@@ -203,9 +203,9 @@
               <select onchange="movePlayer('{{ p.player_id }}', 'ACTIVE', this.value)"
                       class="bg-slate-800 border border-slate-700 text-slate-100 rounded px-2 py-1 text-xs">
                 {% for slot_code in lineup_slots_ordered %}
-                <option value="{{ slot_code }}" {% if p.lineup_slot == slot_code %}selected{% endif %}>{{ slot_labels.get(slot_code, slot_code) }}</option>
+                <option value="{{ slot_code }}" {% if p.is_scoring and p.lineup_slot == slot_code %}selected{% endif %}>{{ slot_labels.get(slot_code, slot_code) }}</option>
                 {% endfor %}
-                <option value="BN" {% if p.lineup_slot in ['BN', 'BENCH'] %}selected{% endif %}>BN</option>
+                <option value="BN" {% if (not p.is_scoring) or (p.lineup_slot in ['BN', 'BENCH']) %}selected{% endif %}>BN</option>
               </select>
               <button onclick="movePlayer('{{ p.player_id }}', 'MINORS', 'BN')"
                       class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700">
