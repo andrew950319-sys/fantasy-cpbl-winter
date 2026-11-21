@@ -32,9 +32,6 @@
     <div class="flex flex-wrap items-center justify-between gap-4 bg-slate-900 border border-slate-800 rounded-xl p-4">
       <div>
         <h1 class="text-xl font-bold text-slate-100">Fantasy 對戰與守位調度中心</h1>
-        <p class="text-xs text-slate-400 mt-0.5">
-          先發順序：SP1~3、P1~3、CP1~3、DH(2)、C、1B、2B、3B、SS、OF(3) 算分；BN（板凳）／二軍／傷兵／特殊不算分
-        </p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
         {% if enable_admin %}
@@ -176,10 +173,6 @@
           </label>
         </div>
 
-        <p class="text-xs text-slate-400">
-          先發順序：SP1、SP2、SP3、P1、P2、P3、CP1、CP2、CP3、DH(2)、C、1B、2B、3B、SS、OF(3)（算分），最後為 BN（不算分）。
-        </p>
-
         <div class="divide-y divide-slate-800 max-h-[620px] overflow-y-auto pr-1">
           {% for p in active_players %}
           <div class="py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -190,9 +183,9 @@
               <span class="ml-1 text-[11px] text-slate-400">[{{ p.real_team }}]</span>
               {% endif %}
               {% if p.is_scoring %}
-              <span class="ml-1 px-1.5 py-0.5 rounded bg-slate-800 text-emerald-300 border border-slate-700">先發:{{ p.lineup_label }}</span>
+              <span class="ml-1 px-1.5 py-0.5 rounded bg-slate-800 text-emerald-300 border border-slate-700">{{ p.lineup_label }}</span>
               {% else %}
-              <span class="ml-1 px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">BN(不算分)</span>
+              <span class="ml-1 px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">BN</span>
               {% endif %}
               <div class="text-[11px] text-slate-400 mt-0.5 font-mono">
                 R:{{ p.r }} AVG:{{ p.avg }} RBI:{{ p.rbi }} SB:{{ p.sb }} HR:{{ p.hr }} OPS:{{ p.ops }} |
