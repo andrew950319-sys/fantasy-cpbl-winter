@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <title>對戰與調度中心</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen p-4 md:p-6">
+  <div class="max-w-7xl mx-auto space-y-6">
+
+    <!-- 頂部列 -->
+    <div class="flex flex-wrap items-center justify-between gap-4 bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div>
+        <h1 class="text-xl font-bold text-white">Fantasy 對戰與守位調度中心</h1>
+        <p class="text-xs text-slate-400 mt-0.5">
+          僅「先發算分 16 槽（野手 7 + 投手 9）」計入 12 項 H2H；板凳／二軍／傷兵／特殊不算分
+        </p>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <button onclick="seedTeam('台灣山林', 28)" class="px-3 py-1.5 text-xs rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white">
+          + 灌入台灣山林(28人)
+        </button>
+        <button onclick="seedTeam('台灣海洋', 28)" class="px-3 py-1.5 text-xs rounded-lg bg-teal-700 hover:bg-teal-600 text-white">
+          + 灌入台灣海洋(28人)
+        </button>
+        <button onclick="cleanupTest()" class="px-3 py-1.5 text-xs rounded-lg bg-rose-900/70 hover:bg-rose-800 text-rose-200 border border-rose-700/50">
+          清除測試資料
+        </button>
+        {% if logged_team %}
+        <button onclick="logoutTeam()" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200">
+          登出（{{ logged_team }}）
+        </button>
+        {% endif %}
+      </div>
+    </div>
+
+    {% if error %}
+    <div class="bg-rose-950/70 border border-rose-700 text-rose-200 px-4 py-3 rounded-xl text-sm">
+      {{ error }}
+    </div>
+    {% endif %}
+
+    <!-- 登入區塊 -->
+    {% if not logged_team %}
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 max-w-md mx-auto">
+      <h2 class="text-base font-semibold mb-3">選擇要操作的隊伍</h2>
+      <div class="space-y-3">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">隊伍</label>
+          <select id="loginTeam" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+            {% for t in teams %}
+            <option value="{{ t }}">{{ t }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">密碼</label>
+          <input id="loginPass" type="password" placeholder="一軍預設 1111~4444 / 測試隊 0000"
+                 class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <button onclick="loginTeam()" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-2 rounded-lg text-sm">
+          登入並進入調度
+        </button>
+        <p id="loginMsg" class="text-xs text-rose-400"></p>
+      </div>
+    </div>
+    {% else %}
+
+    <!-- 日期與對手篩選 -->
+    <form method="get" action="/matchup" class="flex flex-wrap items-center gap-4 bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <input type="hidden" name="code" value="{{ logged_code }}" />
+      <div>
+        <label class="text-xs text-slate-400 mr-2">統計日期</label>
+        <select name="stat_date" onchange="this.form.submit()" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm">
+          <option value="ALL" {% if selected_date == 'ALL' %}selected{% endif %}>全部累積（ALL）</option>
+          {% for d in available_dates %}
+          <option value="{{ d }}" {% if selected_date == d %}selected{% endif %}>{{ d }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label class="text-xs text-slate-400 mr-2">對戰對手</label>
+        <select name="opp" onchange="this.form.submit()" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm">
+          {% for ot in other_teams %}
+          <option value="{{ ot }}" {% if opponent_team == ot %}selected{% endif %}>{{ ot }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="text-xs text-slate-400">
+        全隊總人數：<span class="text-white font-semibold">{{ total_on_team }}/{{ max_total }}</span>
+      </div>
+      <div class="ml-auto text-sm font-semibold">
+        {{ logged_team }} vs {{ opponent_team }}：
+        <span class="text-emerald-400">{{ wins }}W</span> -
+        <span class="text-rose-400">{{ losses }}L</span> -
+        <span class="text-slate-300">{{ ties }}T</span>
+      </div>
+    </form>
+
+    <!-- 12 項 H2H 比分表 -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 overflow-x-auto">
+      <h2 class="text-sm font-semibold text-slate-300 mb-3">12 項 H2H 比分（{{ selected_date }}）</h2>
+      <table class="w-full text-sm text-left">
+        <thead>
+          <tr class="border-b border-slate-800 text-slate-400 text-xs">
+            <th class="py-2 pr-4">類別</th>
+            <th class="py-2 px-3">{{ logged_team }}</th>
+            <th class="py-2 px-3">{{ opponent_team }}</th>
+            <th class="py-2 pl-3">結果</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800/70">
+          {% for c in categories %}
+          <tr>
+            <td class="py-2 pr-4 font-medium">{{ c.name }}</td>
+            <td class="py-2 px-3 font-mono">{{ c.my }}</td>
+            <td class="py-2 px-3 font-mono">{{ c.opp }}</td>
+            <td class="py-2 pl-3">
+              {% if c.result == 'win' %}
+              <span class="px-2 py-0.5 text-xs rounded bg-emerald-900/70 text-emerald-300">WIN</span>
+              {% elif c.result == 'loss' %}
+              <span class="px-2 py-0.5 text-xs rounded bg-rose-900/70 text-rose-300">LOSS</span>
+              {% else %}
+              <span class="px-2 py-0.5 text-xs rounded bg-slate-800 text-slate-300">TIE</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 調度區：一軍（先發16槽 + 板凳）與 二軍/傷兵/特殊/自由球員池 -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+      <!-- 左側：一軍名單（ACTIVE：先發算分槽位 + 板凳） -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-4">
+        <div class="flex items-center justify-between">
+          <h2 class="text-base font-semibold text-white">
+            一軍名單（ACTIVE：{{ active_players|length }}/{{ max_active }}）
+          </h2>
+          <label class="flex items-center gap-1.5 text-xs text-amber-300 cursor-pointer">
+            <input id="forceOverride" type="checkbox" class="rounded bg-slate-800 border-slate-600" />
+            強制覆寫（鎖定/守位/名額）
+          </label>
+        </div>
+
+        <p class="text-xs text-slate-400">
+          先發槽位（野手 C/1B/2B/3B/SS/OF/DH、投手 SP1~3/P1~3/RP1~3）會算分；選「BENCH」為板凳（不算分）。
+        </p>
+
+        <div class="divide-y divide-slate-800 max-h-[580px] overflow-y-auto pr-1">
+          {% for p in active_players %}
+          <div class="py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div>
+              <span class="font-semibold text-white">{{ p.name }}</span>
+              <span class="ml-1.5 px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">{{ p.positions|join(',') or p.position }}</span>
+              {% if p.real_team %}
+              <span class="ml-1 text-[11px] text-slate-400">[{{ p.real_team }}]</span>
+              {% endif %}
+              {% if p.is_scoring %}
+              <span class="ml-1 px-1.5 py-0.5 rounded bg-emerald-900/70 text-emerald-300">算分:{{ p.lineup_slot }}</span>
+              {% else %}
+              <span class="ml-1 px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">板凳(不算分)</span>
+              {% endif %}
+              <div class="text-[11px] text-slate-400 mt-0.5 font-mono">
+                R:{{ p.r }} AVG:{{ p.avg }} RBI:{{ p.rbi }} SB:{{ p.sb }} HR:{{ p.hr }} OPS:{{ p.ops }} |
+                W:{{ p.w }} IP:{{ p.ip }} ERA:{{ p.era }} K:{{ p.k }} HLD:{{ p.hld }} SV:{{ p.sv }} WHIP:{{ p.whip }}
+              </div>
+            </div>
+            <div class="flex items-center gap-1.5">
+              <select onchange="movePlayer('{{ p.player_id }}', 'ACTIVE', this.value)"
+                      class="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs">
+                <option value="BENCH" {% if p.lineup_slot == 'BENCH' %}selected{% endif %}>BENCH(板凳)</option>
+                <optgroup label="野手先發(算分)">
+                  {% for bs in batter_slots %}
+                  <option value="{{ bs }}" {% if p.lineup_slot == bs %}selected{% endif %}>{{ bs }}</option>
+                  {% endfor %}
+                </optgroup>
+                <optgroup label="投手先發(算分)">
+                  {% for ps in pitcher_slots %}
+                  <option value="{{ ps }}" {% if p.lineup_slot == ps %}selected{% endif %}>{{ ps }}</option>
+                  {% endfor %}
+                </optgroup>
+              </select>
+              <button onclick="movePlayer('{{ p.player_id }}', 'MINORS', 'BENCH')"
+                      class="px-2 py-1 rounded bg-amber-900/70 hover:bg-amber-800 text-amber-200">
+                下二軍
+              </button>
+              <button onclick="movePlayer('{{ p.player_id }}', 'IL', 'BENCH')"
+                      class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200">
+                傷兵
+              </button>
+              <button onclick="releasePlayer('{{ p.player_id }}', '{{ p.name }}')"
+                      class="px-2 py-1 rounded bg-rose-950 hover:bg-rose-900 text-rose-300">
+                釋出
+              </button>
+            </div>
+          </div>
+          {% else %}
+          <p class="text-xs text-slate-500 py-4">目前沒有一軍球員</p>
+          {% endfor %}
+        </div>
+      </div>
+
+      <!-- 右側：二軍 / 傷兵 / 特殊名單 / 自由球員池 -->
+      <div class="space-y-4">
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+          <h3 class="text-sm font-semibold text-amber-300 mb-2">二軍（MINORS：{{ minors_players|length }} 人）</h3>
+          <div class="divide-y divide-slate-800 max-h-44 overflow-y-auto">
+            {% for p in minors_players %}
+            <div class="py-2 flex items-center justify-between text-xs">
+              <div>
+                <span class="font-medium text-white">{{ p.name }}</span>
+                <span class="ml-1 text-slate-400">({{ p.positions|join(',') or p.position }})</span>
+                {% if p.real_team %}<span class="ml-1 text-slate-500">[{{ p.real_team }}]</span>{% endif %}
+                {% if p.is_locked %}
+                <span class="ml-1 text-rose-400">鎖定剩餘 {{ p.days_remaining }} 天</span>
+                {% endif %}
+              </div>
+              <div class="flex gap-1.5">
+                <button onclick="movePlayer('{{ p.player_id }}', 'ACTIVE', 'BENCH')"
+                        class="px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white">
+                  升一軍(板凳)
+                </button>
+                <button onclick="releasePlayer('{{ p.player_id }}', '{{ p.name }}')"
+                        class="px-2 py-1 rounded bg-rose-950 hover:bg-rose-900 text-rose-300">
+                  釋出
+                </button>
+              </div>
+            </div>
+            {% else %}
+            <p class="text-xs text-slate-500">無二軍球員</p>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+            <h3 class="text-sm font-semibold text-sky-300 mb-2">傷兵名單（IL：{{ il_players|length }}）</h3>
+            <div class="divide-y divide-slate-800 max-h-32 overflow-y-auto">
+              {% for p in il_players %}
+              <div class="py-1.5 flex items-center justify-between text-xs">
+                <span>{{ p.name }} ({{ p.positions|join(',') or p.position }})</span>
+                <button onclick="movePlayer('{{ p.player_id }}', 'ACTIVE', 'BENCH')"
+                        class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700">
+                  回一軍
+                </button>
+              </div>
+              {% else %}
+              <p class="text-xs text-slate-500">無傷兵球員</p>
+              {% endfor %}
+            </div>
+          </div>
+
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+            <h3 class="text-sm font-semibold text-purple-300 mb-2">特殊名單（SPECIAL：{{ special_players|length }}）</h3>
+            <div class="divide-y divide-slate-800 max-h-32 overflow-y-auto">
+              {% for p in special_players %}
+              <div class="py-1.5 flex items-center justify-between text-xs">
+                <span>{{ p.name }} ({{ p.positions|join(',') or p.position }})</span>
+                <button onclick="movePlayer('{{ p.player_id }}', 'ACTIVE', 'BENCH')"
+                        class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700">
+                  回一軍
+                </button>
+              </div>
+              {% else %}
+              <p class="text-xs text-slate-500">無特殊名單球員</p>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+
+        <!-- 自由球員池（FA -> 新註冊進一軍） -->
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="text-sm font-semibold text-cyan-300">自由球員池（FA：{{ fa_players|length }} 人）</h3>
+            <span class="text-[11px] text-slate-400">點「新註冊」會直接註冊進一軍（ACTIVE）</span>
+          </div>
+          <div class="divide-y divide-slate-800 max-h-48 overflow-y-auto">
+            {% for p in fa_players %}
+            <div class="py-2 flex items-center justify-between text-xs">
+              <div>
+                <span class="font-medium text-white">{{ p.name }}</span>
+                <span class="ml-1 text-slate-400">({{ p.positions|join(',') or p.position }})</span>
+                {% if p.real_team %}<span class="ml-1 text-slate-500">[{{ p.real_team }}]</span>{% endif %}
+              </div>
+              <div>
+                <button onclick="registerPlayerToActive('{{ p.player_id }}')"
+                        class="px-2.5 py-1 rounded bg-cyan-700 hover:bg-cyan-600 text-white">
+                  新註冊
+                </button>
+              </div>
+            </div>
+            {% else %}
+            <p class="text-xs text-slate-500">目前自由球員池沒有待註冊球員</p>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 底部工具區：CPBL/冬盟抓數 + 手動建檔/改守位 -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+        <h3 class="text-sm font-semibold text-white">抓取 CPBL／冬盟單場成績</h3>
+        <div class="grid grid-cols-3 gap-2 text-xs">
+          <div>
+            <label class="block text-slate-400 mb-1">年度 (year)</label>
+            <input id="cpblYear" value="2026" class="w-full bg-slate-800 border border-slate-700 rounded px-2.5 py-1.5" />
+          </div>
+          <div>
+            <label class="block text-slate-400 mb-1">賽事碼 (kind_code)</label>
+            <input id="cpblKind" value="A" class="w-full bg-slate-800 border border-slate-700 rounded px-2.5 py-1.5" />
+          </div>
+          <div>
+            <label class="block text-slate-400 mb-1">場次編號 (game_sno)</label>
+            <input id="cpblSno" placeholder="例如 274" class="w-full bg-slate-800 border border-slate-700 rounded px-2.5 py-1.5" />
+          </div>
+        </div>
+        <button onclick="importCpblGame()" class="px-3 py-1.5 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white">
+          立即抓取並匯入
+        </button>
+        <pre id="cpblResult" class="text-[11px] bg-slate-950 border border-slate-800 rounded p-2.5 text-slate-300 overflow-x-auto max-h-40"></pre>
+      </div>
+
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+        <h3 class="text-sm font-semibold text-white">手動新增／更新球員與守位</h3>
+        <div class="grid grid-cols-2 gap-2 text-xs">
+          <div>
+            <label class="block text-slate-400 mb-1">球員姓名</label>
+            <input id="admName" placeholder="例如 張育成" class="w-full bg-slate-800 border border-slate-700 rounded px-2.5 py-1.5" />
+          </div>
+          <div>
+            <label class="block text-slate-400 mb-1">現實所屬球隊（開賽鎖定依據）</label>
+            <input id="admRealTeam" value="{{ logged_team }}" placeholder="例如 富邦悍將 / 台灣山林" class="w-full bg-slate-800 border border-slate-700 rounded px-2.5 py-1.5" />
+          </div>
+          <div>
+            <label class="block text-slate-400 mb-1">Fantasy 所屬隊伍</label>
+            <select id="admFantasyTeam" class="w-full bg-slate-800 border border-slate-700 rounded px-2.5 py-1.5">
+              <option value="">（放入自由球員池 FA）</option>
+              {% for t in teams %}
+              <option value="{{ t }}" {% if t == logged_team %}selected{% endif %}>{{ t }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div>
+            <label class="block text-slate-400 mb-1">守位（逗號分隔，如 SS,2B,3B）</label>
+            <input id="admPos" value="SS,2B,3B" class="w-full bg-slate-800 border border-slate-700 rounded px-2.5 py-1.5" />
+          </div>
+          <div class="col-span-2">
+            <label class="block text-slate-400 mb-1">名單狀態</label>
+            <select id="admSlot" class="w-full bg-slate-800 border border-slate-700 rounded px-2.5 py-1.5">
+              <option value="ACTIVE">ACTIVE（一軍）</option>
+              <option value="MINORS">MINORS（二軍）</option>
+              <option value="IL">IL（傷兵）</option>
+              <option value="SPECIAL">SPECIAL（特殊）</option>
+              <option value="RELEASED">RELEASED（自由球員池）</option>
+            </select>
+          </div>
+        </div>
+        <button onclick="saveAdminPlayer()" class="px-3 py-1.5 text-xs rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white">
+          儲存球員設定
+        </button>
+        <p id="admMsg" class="text-xs text-emerald-400"></p>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  <script>
+    async function loginTeam() {
+      const team = document.getElementById("loginTeam").value;
+      const password = document.getElementById("loginPass").value;
+      const res = await fetch("/api/login", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({team, password})
+      });
+      const data = await res.json();
+      if (data.ok) {
+        location.href = data.redirect_url || "/matchup";
+      } else {
+        document.getElementById("loginMsg").textContent = data.error || "登入失敗";
+      }
+    }
+
+    async function logoutTeam() {
+      await fetch("/api/logout", {method: "POST"});
+      location.href = "/matchup";
+    }
+
+    async function movePlayer(playerId, rosterSlot, lineupSlot) {
+      const forceEl = document.getElementById("forceOverride");
+      const force_override = forceEl ? forceEl.checked : false;
+      const res = await fetch("/api/lineup/move", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          player_id: playerId,
+          roster_slot: rosterSlot,
+          lineup_slot: lineupSlot,
+          force_override
+        })
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        alert(data.error || "調度失敗");
+        location.reload();
+        return;
+      }
+      location.reload();
+    }
+
+    async function releasePlayer(playerId, playerName) {
+      if (!confirm(`確定要將 ${playerName} 釋出至自由球員池（FA）嗎？`)) return;
+      await movePlayer(playerId, "RELEASED", "BENCH");
+    }
+
+    async function registerPlayerToActive(playerId) {
+      const forceEl = document.getElementById("forceOverride");
+      const force_override = forceEl ? forceEl.checked : false;
+      const res = await fetch("/api/fa/sign", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          player_id: playerId,
+          roster_slot: "ACTIVE",
+          lineup_slot: "BENCH",
+          force_override
+        })
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        alert(data.error || "新註冊失敗");
+        return;
+      }
+      location.reload();
+    }
+
+    async function seedTeam(team, count) {
+      const res = await fetch("/api/admin/seed-winter-test", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({team, count})
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        alert(data.error || "建立失敗");
+        return;
+      }
+      alert(`已建立 ${data.team} 測試球員 ${data.seeded_players} 位（25 人一軍 + ${Math.max(0, data.seeded_players - 25)} 人二軍）！`);
+      location.reload();
+    }
+
+    async function cleanupTest() {
+      if (!confirm("確定要清除台灣山林與台灣海洋的測試資料嗎？")) return;
+      const res = await fetch("/api/admin/cleanup-winter-test", {method: "POST"});
+      const data = await res.json();
+      if (!data.ok) {
+        alert(data.error || "清除失敗");
+        return;
+      }
+      alert(`已清除 ${data.removed_players} 位測試球員`);
+      location.reload();
+    }
+
+    async function importCpblGame() {
+      const year = document.getElementById("cpblYear").value.trim();
+      const kind_code = document.getElementById("cpblKind").value.trim();
+      const game_sno = document.getElementById("cpblSno").value.trim();
+      const out = document.getElementById("cpblResult");
+      out.textContent = "抓取中...";
+      const res = await fetch("/api/stats/import/cpbl", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({year, kind_code, game_sno})
+      });
+      const data = await res.json();
+      out.textContent = JSON.stringify(data, null, 2);
+      if (data.ok) {
+        setTimeout(() => location.reload(), 1200);
+      }
+    }
+
+    async function saveAdminPlayer() {
+      const name = document.getElementById("admName").value.trim();
+      const real_team = document.getElementById("admRealTeam").value.trim();
+      const fantasy_team = document.getElementById("admFantasyTeam").value;
+      const positions = document.getElementById("admPos").value.split(",").map(s => s.trim()).filter(Boolean);
+      const roster_slot = document.getElementById("admSlot").value;
+      const msg = document.getElementById("admMsg");
+
+      const res = await fetch("/api/admin/player", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({name, real_team, fantasy_team, positions, roster_slot, lineup_slot: "BENCH"})
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        msg.className = "text-xs text-rose-400";
+        msg.textContent = data.error || "儲存失敗";
+        return;
+      }
+      msg.className = "text-xs text-emerald-400";
+      msg.textContent = `已儲存球員（ID: ${data.player_id}），重新整理中...`;
+      setTimeout(() => location.reload(), 600);
+    }
+  </script>
+</body>
+</html>
