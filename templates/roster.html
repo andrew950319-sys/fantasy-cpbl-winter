@@ -1,99 +1,113 @@
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html lang="zh-Hant">
 <head>
-    <meta charset="UTF-8">
-    <title>球隊名單 - CPBL Fantasy</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+  <meta charset="UTF-8" />
+  <title>球員名單 - {{ current_team }}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-slate-100 text-slate-800 p-6">
-    <div class="max-w-5xl mx-auto bg-white p-6 rounded-xl shadow-lg border border-slate-200">
+<body class="bg-slate-950 text-slate-200 min-h-screen p-4 md:p-6">
+  <div class="max-w-7xl mx-auto space-y-6">
 
-        <!-- 頂部導覽列 -->
-        <div class="flex justify-between items-center mb-6 pb-4 border-b border-slate-200">
-            <h1 class="text-xl font-black text-slate-900 tracking-wider">⚾ CPBL FANTASY 聯盟</h1>
-            <div class="flex gap-2">
-                <a href="/" class="px-4 py-2 rounded-lg text-sm font-bold bg-slate-200 text-slate-700 hover:bg-slate-300">聯盟首頁</a>
-                <a href="/roster" class="px-4 py-2 rounded-lg text-sm font-bold bg-slate-900 text-white">球隊名單</a>
-                <a href="/matchup" class="px-4 py-2 rounded-lg text-sm font-bold bg-slate-200 text-slate-700 hover:bg-slate-300">對戰與調度</a>
-            </div>
-        </div>
+    <!-- 跨頁導覽列 -->
+    <nav class="flex flex-wrap items-center justify-between gap-3 bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-xs">
+      <div class="flex flex-wrap items-center gap-2">
+        <a href="/" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium">
+          首頁
+        </a>
+        <a href="/roster" class="px-3 py-1.5 rounded-lg bg-slate-700 text-white font-medium border border-slate-600">
+          球員名單
+        </a>
+        <a href="/matchup" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium">
+          對戰與調度中心
+        </a>
+      </div>
+      <div class="text-slate-400">
+        檢視隊伍：<span class="text-slate-100 font-semibold">{{ current_team }}</span>
+      </div>
+    </nav>
 
-        <div class="flex justify-between items-center mb-6">
-            <div>
-                <h2 class="text-2xl font-black text-slate-900">各隊球員與一二軍陣容</h2>
-                <p class="text-xs text-slate-500 mt-1">中華職棒大聯盟球員登錄狀況</p>
-            </div>
-            <div class="bg-blue-50 text-blue-700 px-3 py-1 rounded-full text-xs font-semibold">
-                檢視中：{{ current_team }}
-            </div>
-        </div>
-
-        <!-- 四球隊分頁切換列 -->
-        <div class="mb-8 flex gap-3">
-            {% for t in teams %}
-            <a href="/roster?team={{ t }}" class="flex-1 text-center py-2.5 rounded-lg text-sm font-bold transition shadow-sm {% if current_team == t %} bg-slate-900 text-white shadow-md {% else %} bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-300 {% endif %}">
-                {{ t }}
-            </a>
-            {% endfor %}
-        </div>
-
-        <!-- 一二軍雙欄位區塊排版 -->
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div class="bg-white rounded-lg border border-slate-200 overflow-hidden shadow-sm">
-                <div class="bg-emerald-600 text-white px-4 py-3 font-bold text-sm flex justify-between items-center">
-                    <span>🔥 一軍名單 (Active)</span>
-                    <span class="text-xs bg-emerald-700 px-2 py-0.5 rounded">{{ active_players|length }} 人</span>
-                </div>
-                <table class="w-full text-left border-collapse">
-                    <thead>
-                        <tr class="bg-slate-50 text-slate-500 text-xs uppercase border-b border-slate-200">
-                            <th class="p-3 text-center">姓名</th>
-                            <th class="p-3 text-center">守備位置</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-slate-100 text-sm">
-                        {% for player in active_players %}
-                        <tr class="hover:bg-slate-50">
-                            <td class="p-3 text-center font-bold text-slate-800">{{ player[1] }}</td>
-                            <td class="p-3 text-center text-slate-600">{{ player[2] }}</td>
-                        </tr>
-                        {% else %}
-                        <tr>
-                            <td colspan="2" class="p-4 text-center text-slate-400 text-xs">目前無一軍球員</td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-
-            <div class="bg-white rounded-lg border border-slate-200 overflow-hidden shadow-sm">
-                <div class="bg-amber-600 text-white px-4 py-3 font-bold text-sm flex justify-between items-center">
-                    <span>🌱 二軍名單 (Minors)</span>
-                    <span class="text-xs bg-amber-700 px-2 py-0.5 rounded">{{ minors_players|length }} 人</span>
-                </div>
-                <table class="w-full text-left border-collapse">
-                    <thead>
-                        <tr class="bg-slate-50 text-slate-500 text-xs uppercase border-b border-slate-200">
-                            <th class="p-3 text-center">姓名</th>
-                            <th class="p-3 text-center">守備位置</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-slate-100 text-sm">
-                        {% for player in minors_players %}
-                        <tr class="hover:bg-slate-50">
-                            <td class="p-3 text-center font-bold text-slate-800">{{ player[1] }}</td>
-                            <td class="p-3 text-center text-slate-600">{{ player[2] }}</td>
-                        </tr>
-                        {% else %}
-                        <tr>
-                            <td colspan="2" class="p-4 text-center text-slate-400 text-xs">目前無二軍球員</td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
+    <!-- 隊伍切換列 -->
+    <div class="flex flex-wrap items-center justify-between gap-4 bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div>
+        <h1 class="text-xl font-bold text-slate-100">球員名單（{{ current_team }}）</h1>
+        <p class="text-xs text-slate-400 mt-0.5">一軍名單與二軍名單總覽</p>
+      </div>
+      <form method="get" action="/roster" class="flex items-center gap-2 text-xs">
+        <label for="teamSelect" class="text-slate-400">切換隊伍</label>
+        <select id="teamSelect" name="team" onchange="this.form.submit()"
+                class="bg-slate-800 border border-slate-700 text-slate-100 rounded-lg px-3 py-1.5 text-sm">
+          {% for t in teams %}
+          <option value="{{ t }}" {% if t == current_team %}selected{% endif %}>{{ t }}</option>
+          {% endfor %}
+        </select>
+      </form>
     </div>
+
+    <!-- 一軍與二軍名單 -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <h2 class="text-base font-semibold text-slate-100 mb-3">
+          一軍名單（{{ active_players|length }} 人）
+        </h2>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm text-left">
+            <thead>
+              <tr class="border-b border-slate-800 text-slate-400 text-xs">
+                <th class="py-2 pr-3">姓名</th>
+                <th class="py-2 px-3">守位</th>
+                <th class="py-2 pl-3">調度槽位</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800/70">
+              {% for pid, name, pos, lslot in active_players %}
+              <tr>
+                <td class="py-2 pr-3 font-medium text-slate-100">{{ name }}</td>
+                <td class="py-2 px-3 text-slate-300 font-mono text-xs">{{ pos }}</td>
+                <td class="py-2 pl-3">
+                  <span class="px-2 py-0.5 text-xs rounded bg-slate-800 text-slate-200 border border-slate-700 font-mono">
+                    {{ lslot }}
+                  </span>
+                </td>
+              </tr>
+              {% else %}
+              <tr>
+                <td colspan="3" class="py-4 text-xs text-slate-500">目前沒有一軍球員</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <h2 class="text-base font-semibold text-slate-100 mb-3">
+          二軍名單（{{ minors_players|length }} 人）
+        </h2>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm text-left">
+            <thead>
+              <tr class="border-b border-slate-800 text-slate-400 text-xs">
+                <th class="py-2 pr-3">姓名</th>
+                <th class="py-2 pl-3">守位</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800/70">
+              {% for pid, name, pos in minors_players %}
+              <tr>
+                <td class="py-2 pr-3 font-medium text-slate-100">{{ name }}</td>
+                <td class="py-2 pl-3 text-slate-300 font-mono text-xs">{{ pos }}</td>
+              </tr>
+              {% else %}
+              <tr>
+                <td colspan="2" class="py-4 text-xs text-slate-500">目前沒有二軍球員</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
 </body>
 </html>

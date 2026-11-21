@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 import os
 import sqlite3
 from fastapi import FastAPI, Request
@@ -31,6 +31,22 @@ TEAMS = ["樂天桃猿", "中信兄弟", "味全龍", "富邦悍將"]
 TEST_TEAMS = ["台灣山林", "台灣海洋"]
 ALL_AVAILABLE_TEAMS = TEAMS + TEST_TEAMS
 
+SCHEDULE_WEEKS = [
+    {
+        "key": "2026-11-23_2026-11-29",
+        "label": "第1週（11/23～11/29）",
+        "start_date": "2026-11-23",
+        "end_date": "2026-11-29",
+    },
+    {
+        "key": "2026-11-30_2026-12-03",
+        "label": "第2週（11/30～12/3）",
+        "start_date": "2026-11-30",
+        "end_date": "2026-12-03",
+    },
+]
+SCHEDULE_WEEK_MAP = {w["key"]: w for w in SCHEDULE_WEEKS}
+
 TEAM_CODES = {
     "樂天桃猿": "rakuten",
     "中信兄弟": "brothers",
@@ -53,7 +69,6 @@ VALID_SLOTS = {"ACTIVE", "MINORS", "IL", "SPECIAL", "RELEASED"}
 LOCKED_10_DAYS_SLOTS = {"MINORS", "IL"}
 LOCK_DAYS = 10
 
-# 先發槽位順序：SP1~3, P1~3, CP1~3, DH(2), C, 1B, 2B, 3B, SS, OF(3)，最後為 BN
 LINEUP_SLOTS_PITCHER_STARTER = ["SP1", "SP2", "SP3"]
 LINEUP_SLOTS_PITCHER_GENERAL = ["P1", "P2", "P3"]
 LINEUP_SLOTS_CLOSER = ["CP1", "CP2", "CP3"]
@@ -158,6 +173,19 @@ class CpblImportPayload(BaseModel):
     year: str = "2026"
     kind_code: str = "A"
     game_sno: str
+    stat_date: str = ""
+    week_key: str = ""
+
+
+class ScheduleEntryPayload(BaseModel):
+    week_key: str = "2026-11-23_2026-11-29"
+    game_date: str
+    start_time: str = ""
+    away_team: str = "台灣山林"
+    home_team: str = "台灣海洋"
+    year: str = "2026"
+    kind_code: str = "A"
+    game_sno: str = ""
 
 
 class SeedWinterPayload(BaseModel):
@@ -248,9 +276,14 @@ def ensure_extended_schema(cursor):
             start_time TEXT DEFAULT '',
             away_team TEXT DEFAULT '',
             home_team TEXT DEFAULT '',
+            week_key TEXT DEFAULT '',
             updated_at TEXT
         )
     """)
+    cursor.execute("PRAGMA table_info(cpbl_games)")
+    g_cols = {r["name"] for r in cursor.fetchall()}
+    if "week_key" not in g_cols:
+        cursor.execute("ALTER TABLE cpbl_games ADD COLUMN week_key TEXT DEFAULT ''")
 
     cursor.execute("""
         UPDATE team_rosters
@@ -528,7 +561,30 @@ def get_available_dates() -> list[str]:
     return dates
 
 
-def calc_team_12_cats(fantasy_team: str, date_filter: str = "ALL"):
+def get_schedule_games(week_key: str | None = None) -> list[dict]:
+    conn = get_db()
+    cursor = conn.cursor()
+    ensure_extended_schema(cursor)
+    if week_key and week_key in SCHEDULE_WEEK_MAP:
+        w = SCHEDULE_WEEK_MAP[week_key]
+        cursor.execute("""
+            SELECT game_key, year, kind_code, game_sno, game_date, start_time, away_team, home_team, week_key
+            FROM cpbl_games
+            WHERE week_key = ? OR (game_date >= ? AND game_date <= ?)
+            ORDER BY game_date ASC, game_sno ASC
+        """, (week_key, w["start_date"], w["end_date"]))
+    else:
+        cursor.execute("""
+            SELECT game_key, year, kind_code, game_sno, game_date, start_time, away_team, home_team, week_key
+            FROM cpbl_games
+            ORDER BY game_date ASC, game_sno ASC
+        """)
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+
+def calc_team_12_cats(fantasy_team: str, date_filter: str = "ALL", week_key: str = "ALL"):
     conn = get_db()
     cursor = conn.cursor()
     ensure_extended_schema(cursor)
@@ -583,6 +639,10 @@ def calc_team_12_cats(fantasy_team: str, date_filter: str = "ALL"):
         if date_filter and date_filter != "ALL":
             sql += " AND stat_date = ?"
             params.append(date_filter)
+        elif week_key and week_key in SCHEDULE_WEEK_MAP:
+            w = SCHEDULE_WEEK_MAP[week_key]
+            sql += " AND stat_date >= ? AND stat_date <= ?"
+            params.extend([w["start_date"], w["end_date"]])
 
         cursor.execute(sql, params)
         fetched = cursor.fetchone()
@@ -594,12 +654,22 @@ def calc_team_12_cats(fantasy_team: str, date_filter: str = "ALL"):
     return compute_derived_metrics(agg)
 
 
-def _query_players_block(cursor, where_sql: str, where_params: list, date_filter: str = "ALL") -> list[dict]:
+def _query_players_block(
+    cursor,
+    where_sql: str,
+    where_params: list,
+    date_filter: str = "ALL",
+    week_key: str = "ALL",
+) -> list[dict]:
     params = []
     date_clause = ""
     if date_filter and date_filter != "ALL":
         date_clause = " AND s.stat_date = ?"
         params.append(date_filter)
+    elif week_key and week_key in SCHEDULE_WEEK_MAP:
+        w = SCHEDULE_WEEK_MAP[week_key]
+        date_clause = " AND s.stat_date >= ? AND s.stat_date <= ?"
+        params.extend([w["start_date"], w["end_date"]])
     params.extend(where_params)
 
     cursor.execute(f"""
@@ -687,7 +757,7 @@ def _query_players_block(cursor, where_sql: str, where_params: list, date_filter
     return items
 
 
-def get_team_players_with_stats(fantasy_team: str, date_filter: str = "ALL"):
+def get_team_players_with_stats(fantasy_team: str, date_filter: str = "ALL", week_key: str = "ALL"):
     conn = get_db()
     cursor = conn.cursor()
     ensure_extended_schema(cursor)
@@ -697,6 +767,7 @@ def get_team_players_with_stats(fantasy_team: str, date_filter: str = "ALL"):
         "r.fantasy_team = ? AND r.roster_slot != 'RELEASED'",
         [fantasy_team],
         date_filter,
+        week_key,
     )
     conn.close()
 
@@ -789,11 +860,20 @@ def read_roster(request: Request, team: str = "樂天桃猿"):
 
 
 @app.get("/matchup")
-def read_matchup(request: Request, code: str = None, opp: str = None, stat_date: str = "ALL", error: str = None):
+def read_matchup(
+    request: Request,
+    code: str = None,
+    opp: str = None,
+    stat_date: str = "ALL",
+    week: str = "ALL",
+    error: str = None,
+):
     clear_free_agent_players()
     logged_team = resolve_logged_team(request, code)
     available_dates = get_available_dates()
+    selected_week = week if week in SCHEDULE_WEEK_MAP else "ALL"
     selected_date = stat_date if (stat_date == "ALL" or stat_date in available_dates) else "ALL"
+    schedule_games = get_schedule_games(selected_week if selected_week != "ALL" else None)
 
     grouped_players = {"ACTIVE": [], "MINORS": [], "IL": [], "SPECIAL": [], "FA": []}
     categories = []
@@ -805,9 +885,9 @@ def read_matchup(request: Request, code: str = None, opp: str = None, stat_date:
     opponent_team = opp if opp in other_teams else (other_teams[0] if other_teams else "中信兄弟")
 
     if logged_team:
-        grouped_players = get_team_players_with_stats(logged_team, selected_date)
-        my_stats = calc_team_12_cats(logged_team, selected_date)
-        opp_stats = calc_team_12_cats(opponent_team, selected_date)
+        grouped_players = get_team_players_with_stats(logged_team, selected_date, selected_week)
+        my_stats = calc_team_12_cats(logged_team, selected_date, selected_week)
+        opp_stats = calc_team_12_cats(opponent_team, selected_date, selected_week)
 
         cat_defs = [
             ("r", "得分 (R)"),
@@ -869,6 +949,9 @@ def read_matchup(request: Request, code: str = None, opp: str = None, stat_date:
             "enable_admin": ENABLE_ADMIN,
             "teams": ALL_AVAILABLE_TEAMS,
             "other_teams": other_teams,
+            "schedule_weeks": SCHEDULE_WEEKS,
+            "selected_week": selected_week,
+            "schedule_games": schedule_games,
             "logged_team": logged_team,
             "logged_code": TEAM_CODES.get(logged_team, ""),
             "opponent_team": opponent_team,
@@ -1031,6 +1114,55 @@ def api_lineup_move(request: Request, payload: LineupMovePayload):
 
         conn.commit()
         return JSONResponse({"ok": True})
+    finally:
+        conn.close()
+
+
+@app.post("/api/admin/schedule")
+def api_add_schedule(payload: ScheduleEntryPayload):
+    denied = ensure_admin_enabled()
+    if denied:
+        return denied
+
+    gdate = (payload.game_date or "").strip()
+    if not gdate:
+        return JSONResponse({"ok": False, "error": "請輸入比賽日期（YYYY-MM-DD）"}, status_code=400)
+
+    wkey = payload.week_key if payload.week_key in SCHEDULE_WEEK_MAP else (
+        "2026-11-23_2026-11-29" if gdate <= "2026-11-29" else "2026-11-30_2026-12-03"
+    )
+    sno = (payload.game_sno or "").strip() or f"{gdate.replace('-', '')}_{(payload.away_team or 'A')[:2]}_{(payload.home_team or 'H')[:2]}"
+    gkey = f"{payload.year}_{payload.kind_code}_{sno}"
+    now_iso = datetime.now().isoformat(timespec="seconds")
+
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        ensure_extended_schema(cursor)
+        cursor.execute("""
+            INSERT INTO cpbl_games (game_key, year, kind_code, game_sno, game_date, start_time, away_team, home_team, week_key, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(game_key) DO UPDATE SET
+                game_date = excluded.game_date,
+                start_time = excluded.start_time,
+                away_team = excluded.away_team,
+                home_team = excluded.home_team,
+                week_key = excluded.week_key,
+                updated_at = excluded.updated_at
+        """, (
+            gkey,
+            (payload.year or "2026").strip(),
+            (payload.kind_code or "A").strip(),
+            sno,
+            gdate,
+            (payload.start_time or "").strip(),
+            (payload.away_team or "").strip(),
+            (payload.home_team or "").strip(),
+            wkey,
+            now_iso,
+        ))
+        conn.commit()
+        return JSONResponse({"ok": True, "game_key": gkey, "week_key": wkey})
     finally:
         conn.close()
 

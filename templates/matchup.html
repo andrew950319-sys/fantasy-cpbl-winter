@@ -12,7 +12,7 @@
     <nav class="flex flex-wrap items-center justify-between gap-3 bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-xs">
       <div class="flex flex-wrap items-center gap-2">
         <a href="/" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium">
-          回首頁
+          首頁
         </a>
         <a href="/roster" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium">
           球員名單
@@ -88,9 +88,18 @@
     </div>
     {% else %}
 
-    <!-- 日期與對手篩選 -->
+    <!-- 週次、日期與對手篩選 -->
     <form method="get" action="/matchup" class="flex flex-wrap items-center gap-4 bg-slate-900 border border-slate-800 rounded-xl p-4">
       <input type="hidden" name="code" value="{{ logged_code }}" />
+      <div>
+        <label class="text-xs text-slate-400 mr-2">賽程週次</label>
+        <select name="week" onchange="this.form.submit()" class="bg-slate-800 border border-slate-700 text-slate-100 rounded-lg px-3 py-1.5 text-sm">
+          <option value="ALL" {% if selected_week == 'ALL' %}selected{% endif %}>全部週次（ALL）</option>
+          {% for w in schedule_weeks %}
+          <option value="{{ w.key }}" {% if selected_week == w.key %}selected{% endif %}>{{ w.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
       <div>
         <label class="text-xs text-slate-400 mr-2">統計日期</label>
         <select name="stat_date" onchange="this.form.submit()" class="bg-slate-800 border border-slate-700 text-slate-100 rounded-lg px-3 py-1.5 text-sm">
@@ -152,10 +161,10 @@
       </table>
     </div>
 
-    <!-- 調度區：一軍（先發算分在前 + BN 在後）與 二軍/傷兵/特殊/自由球員 -->
+    <!-- 調度區 -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
-      <!-- 左側：一軍名單（ACTIVE：先發算分槽位在前 + BN 在後） -->
+      <!-- 左側：一軍名單 -->
       <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-4">
         <div class="flex items-center justify-between">
           <h2 class="text-base font-semibold text-slate-100">
@@ -316,6 +325,54 @@
     </div>
 
     {% if enable_admin %}
+    <!-- 賽程登錄（11/23～11/29 與 11/30～12/3） -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <h3 class="text-sm font-semibold text-slate-100">賽程登錄（11/23～11/29、11/30～12/3）</h3>
+        <span class="text-xs text-slate-400">已登錄場次：{{ schedule_games|length }} 場</span>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-5 gap-2 text-xs">
+        <div>
+          <label class="block text-slate-400 mb-1">週次區間</label>
+          <select id="schWeek" class="w-full bg-slate-800 border border-slate-700 text-slate-100 rounded px-2.5 py-1.5">
+            {% for w in schedule_weeks %}
+            <option value="{{ w.key }}">{{ w.label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label class="block text-slate-400 mb-1">比賽日期</label>
+          <input id="schDate" type="date" value="2026-11-23" class="w-full bg-slate-800 border border-slate-700 text-slate-100 rounded px-2.5 py-1.5" />
+        </div>
+        <div>
+          <label class="block text-slate-400 mb-1">客隊</label>
+          <input id="schAway" value="台灣山林" class="w-full bg-slate-800 border border-slate-700 text-slate-100 rounded px-2.5 py-1.5" />
+        </div>
+        <div>
+          <label class="block text-slate-400 mb-1">主隊</label>
+          <input id="schHome" value="台灣海洋" class="w-full bg-slate-800 border border-slate-700 text-slate-100 rounded px-2.5 py-1.5" />
+        </div>
+        <div>
+          <label class="block text-slate-400 mb-1">場次編號（選填）</label>
+          <input id="schSno" placeholder="例如 274" class="w-full bg-slate-800 border border-slate-700 text-slate-100 rounded px-2.5 py-1.5" />
+        </div>
+      </div>
+      <button onclick="saveSchedule()" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700">
+        加入賽程
+      </button>
+      <p id="schMsg" class="text-xs text-emerald-400"></p>
+      {% if schedule_games %}
+      <div class="divide-y divide-slate-800 text-xs pt-1">
+        {% for g in schedule_games %}
+        <div class="py-1.5 flex flex-wrap items-center justify-between gap-2 text-slate-300">
+          <span>{{ g.game_date }} | {{ g.away_team }} @ {{ g.home_team }}</span>
+          <span class="font-mono text-slate-400">{{ g.game_sno }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+
     <!-- 底部工具區：CPBL/冬盟抓數 + 手動建檔/改守位 -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
       <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
@@ -453,6 +510,30 @@
         return;
       }
       location.reload();
+    }
+
+    async function saveSchedule() {
+      const week_key = document.getElementById("schWeek").value;
+      const game_date = document.getElementById("schDate").value;
+      const away_team = document.getElementById("schAway").value.trim();
+      const home_team = document.getElementById("schHome").value.trim();
+      const game_sno = document.getElementById("schSno").value.trim();
+      const msg = document.getElementById("schMsg");
+
+      const res = await fetch("/api/admin/schedule", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({week_key, game_date, away_team, home_team, game_sno})
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        msg.className = "text-xs text-rose-400";
+        msg.textContent = data.error || "加入賽程失敗";
+        return;
+      }
+      msg.className = "text-xs text-emerald-400";
+      msg.textContent = `已加入賽程（${data.game_key}），重新整理中...`;
+      setTimeout(() => location.reload(), 600);
     }
 
     async function seedTeam(team, count) {
