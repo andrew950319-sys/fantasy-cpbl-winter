@@ -1,6 +1,8 @@
 from datetime import date, datetime
 import os
 import sqlite3
+import threading
+import time
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -16,6 +18,19 @@ ENABLE_ADMIN = os.environ.get("ENABLE_ADMIN", "true").strip().lower() in (
     "yes",
     "on",
 )
+AUTO_FETCH_ENABLED = os.environ.get("AUTO_FETCH_ENABLED", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+AUTO_FETCH_INTERVAL_SEC = int(os.environ.get("AUTO_FETCH_INTERVAL_SEC", "600"))
+
+auto_fetch_lock = threading.Lock()
+auto_fetch_status = {
+    "last_run_at": "",
+    "last_summary": "尚未執行自動抓數",
+}
 
 
 def ensure_admin_enabled():
@@ -277,6 +292,7 @@ def ensure_extended_schema(cursor):
             away_team TEXT DEFAULT '',
             home_team TEXT DEFAULT '',
             week_key TEXT DEFAULT '',
+            last_fetched_at TEXT DEFAULT '',
             updated_at TEXT
         )
     """)
@@ -284,6 +300,8 @@ def ensure_extended_schema(cursor):
     g_cols = {r["name"] for r in cursor.fetchall()}
     if "week_key" not in g_cols:
         cursor.execute("ALTER TABLE cpbl_games ADD COLUMN week_key TEXT DEFAULT ''")
+    if "last_fetched_at" not in g_cols:
+        cursor.execute("ALTER TABLE cpbl_games ADD COLUMN last_fetched_at TEXT DEFAULT ''")
 
     cursor.execute("""
         UPDATE team_rosters
@@ -348,6 +366,91 @@ def init_stats_and_sample_data():
 
 
 init_stats_and_sample_data()
+
+
+def run_auto_fetch_due_games(force_all: bool = False) -> dict:
+    with auto_fetch_lock:
+        now_dt = datetime.now()
+        today_str = now_dt.strftime("%Y-%m-%d")
+        now_iso = now_dt.isoformat(timespec="seconds")
+
+        conn = get_db()
+        cursor = conn.cursor()
+        ensure_extended_schema(cursor)
+        cursor.execute("""
+            SELECT game_key, year, kind_code, game_sno, game_date, start_time, last_fetched_at
+            FROM cpbl_games
+            WHERE TRIM(COALESCE(game_sno, '')) != ''
+            ORDER BY game_date ASC, game_sno ASC
+        """)
+        games = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+
+        due_games = []
+        for g in games:
+            sno = (g.get("game_sno") or "").strip()
+            if not sno.isdigit():
+                continue
+            gdate = (g.get("game_date") or "").strip()
+            if not force_all and gdate > today_str:
+                continue
+            due_games.append(g)
+
+        if not due_games:
+            summary = f"無到期需抓數的場次（已檢查 {len(games)} 筆賽程）"
+            auto_fetch_status["last_run_at"] = now_iso
+            auto_fetch_status["last_summary"] = summary
+            return {"ok": True, "fetched_count": 0, "errors": [], "summary": summary}
+
+        fetched_count = 0
+        errors = []
+        for g in due_games:
+            try:
+                import_cpbl_game(
+                    db_path="fantasy_league.db",
+                    year=(g.get("year") or "2026").strip(),
+                    kind_code=(g.get("kind_code") or "A").strip(),
+                    game_sno=g["game_sno"].strip(),
+                )
+                fetched_count += 1
+                c2 = get_db()
+                cur2 = c2.cursor()
+                cur2.execute("""
+                    UPDATE cpbl_games
+                    SET last_fetched_at = ?, updated_at = ?
+                    WHERE game_key = ?
+                """, (now_iso, now_iso, g["game_key"]))
+                c2.commit()
+                c2.close()
+            except Exception as exc:
+                errors.append(f"{g['game_date']} #{g['game_sno']}: {exc}")
+
+        summary = f"成功抓取 {fetched_count}/{len(due_games)} 場" + (f"（{len(errors)} 筆失敗）" if errors else "")
+        auto_fetch_status["last_run_at"] = now_iso
+        auto_fetch_status["last_summary"] = summary
+        return {
+            "ok": len(errors) == 0,
+            "fetched_count": fetched_count,
+            "total_due": len(due_games),
+            "errors": errors,
+            "summary": summary,
+        }
+
+
+def _auto_fetch_worker():
+    while AUTO_FETCH_ENABLED:
+        try:
+            run_auto_fetch_due_games(force_all=False)
+        except Exception:
+            pass
+        time.sleep(max(30, AUTO_FETCH_INTERVAL_SEC))
+
+
+@app.on_event("startup")
+def on_startup_start_scheduler():
+    if AUTO_FETCH_ENABLED:
+        t = threading.Thread(target=_auto_fetch_worker, daemon=True, name="cpbl-auto-fetcher")
+        t.start()
 
 
 def format_rate_3(val: float) -> str:
@@ -568,14 +671,14 @@ def get_schedule_games(week_key: str | None = None) -> list[dict]:
     if week_key and week_key in SCHEDULE_WEEK_MAP:
         w = SCHEDULE_WEEK_MAP[week_key]
         cursor.execute("""
-            SELECT game_key, year, kind_code, game_sno, game_date, start_time, away_team, home_team, week_key
+            SELECT game_key, year, kind_code, game_sno, game_date, start_time, away_team, home_team, week_key, last_fetched_at
             FROM cpbl_games
             WHERE week_key = ? OR (game_date >= ? AND game_date <= ?)
             ORDER BY game_date ASC, game_sno ASC
         """, (week_key, w["start_date"], w["end_date"]))
     else:
         cursor.execute("""
-            SELECT game_key, year, kind_code, game_sno, game_date, start_time, away_team, home_team, week_key
+            SELECT game_key, year, kind_code, game_sno, game_date, start_time, away_team, home_team, week_key, last_fetched_at
             FROM cpbl_games
             ORDER BY game_date ASC, game_sno ASC
         """)
@@ -947,6 +1050,9 @@ def read_matchup(
         context={
             "active_page": "matchup",
             "enable_admin": ENABLE_ADMIN,
+            "auto_fetch_enabled": AUTO_FETCH_ENABLED,
+            "auto_fetch_interval_sec": AUTO_FETCH_INTERVAL_SEC,
+            "auto_fetch_status": auto_fetch_status,
             "teams": ALL_AVAILABLE_TEAMS,
             "other_teams": other_teams,
             "schedule_weeks": SCHEDULE_WEEKS,
@@ -1165,6 +1271,16 @@ def api_add_schedule(payload: ScheduleEntryPayload):
         return JSONResponse({"ok": True, "game_key": gkey, "week_key": wkey})
     finally:
         conn.close()
+
+
+@app.post("/api/admin/auto-fetch/run")
+def api_run_auto_fetch():
+    denied = ensure_admin_enabled()
+    if denied:
+        return denied
+
+    res = run_auto_fetch_due_games(force_all=False)
+    return JSONResponse(res)
 
 
 @app.post("/api/admin/player")

@@ -325,11 +325,22 @@
     </div>
 
     {% if enable_admin %}
-    <!-- 賽程登錄（11/23～11/29 與 11/30～12/3） -->
+    <!-- 賽程登錄（11/23～11/29 與 11/30～12/3）+ 自動抓數狀態 -->
     <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
       <div class="flex flex-wrap items-center justify-between gap-2">
-        <h3 class="text-sm font-semibold text-slate-100">賽程登錄（11/23～11/29、11/30～12/3）</h3>
-        <span class="text-xs text-slate-400">已登錄場次：{{ schedule_games|length }} 場</span>
+        <div>
+          <h3 class="text-sm font-semibold text-slate-100">賽程登錄與自動抓數（11/23～11/29、11/30～12/3）</h3>
+          <p class="text-[11px] text-slate-400 mt-0.5">
+            自動抓數：{{ '已啟用' if auto_fetch_enabled else '已停用' }}（每 {{ auto_fetch_interval_sec }} 秒檢查已到期場次）｜
+            最近狀態：{{ auto_fetch_status.last_summary }}{% if auto_fetch_status.last_run_at %}（{{ auto_fetch_status.last_run_at }}）{% endif %}
+          </p>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-xs text-slate-400">已登錄場次：{{ schedule_games|length }} 場</span>
+          <button onclick="runAutoFetchNow()" class="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700">
+            立即自動掃描抓取
+          </button>
+        </div>
       </div>
       <div class="grid grid-cols-1 md:grid-cols-5 gap-2 text-xs">
         <div>
@@ -353,7 +364,7 @@
           <input id="schHome" value="台灣海洋" class="w-full bg-slate-800 border border-slate-700 text-slate-100 rounded px-2.5 py-1.5" />
         </div>
         <div>
-          <label class="block text-slate-400 mb-1">場次編號（選填）</label>
+          <label class="block text-slate-400 mb-1">場次編號（需填數字才會自動抓）</label>
           <input id="schSno" placeholder="例如 274" class="w-full bg-slate-800 border border-slate-700 text-slate-100 rounded px-2.5 py-1.5" />
         </div>
       </div>
@@ -366,7 +377,9 @@
         {% for g in schedule_games %}
         <div class="py-1.5 flex flex-wrap items-center justify-between gap-2 text-slate-300">
           <span>{{ g.game_date }} | {{ g.away_team }} @ {{ g.home_team }}</span>
-          <span class="font-mono text-slate-400">{{ g.game_sno }}</span>
+          <span class="font-mono text-slate-400">
+            {{ g.game_sno }}{% if g.last_fetched_at %} · 已抓 {{ g.last_fetched_at }}{% endif %}
+          </span>
         </div>
         {% endfor %}
       </div>
@@ -534,6 +547,22 @@
       msg.className = "text-xs text-emerald-400";
       msg.textContent = `已加入賽程（${data.game_key}），重新整理中...`;
       setTimeout(() => location.reload(), 600);
+    }
+
+    async function runAutoFetchNow() {
+      const msg = document.getElementById("schMsg");
+      msg.className = "text-xs text-slate-300";
+      msg.textContent = "正在掃描到期賽程並抓取成績...";
+      const res = await fetch("/api/admin/auto-fetch/run", {method: "POST"});
+      const data = await res.json();
+      if (!data.ok) {
+        msg.className = "text-xs text-rose-400";
+        msg.textContent = data.summary || data.error || "自動抓數發生錯誤";
+        return;
+      }
+      msg.className = "text-xs text-emerald-400";
+      msg.textContent = `${data.summary}，重新整理中...`;
+      setTimeout(() => location.reload(), 800);
     }
 
     async function seedTeam(team, count) {
