@@ -4,7 +4,7 @@ import re
 import sqlite3
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 DB_PATH = "fantasy_league.db"
@@ -106,6 +106,8 @@ def _extract_games_from_text_or_json(
         sno_clean = str(sno or "").strip()
         date_clean = _normalize_date_str(gdate, year)
         if not sno_clean or not date_clean:
+            return
+        if not (WINTER_SEASON_START <= date_clean <= WINTER_SEASON_END):
             return
         wkey = _resolve_week_key_for_date(date_clean)
         if not wkey:
@@ -728,16 +730,104 @@ def cleanup_stale_winter_games(db_path: str = DB_PATH) -> dict[str, Any]:
     }
 
 
+def _probe_next_awb_games(
+    year: str | int,
+    kind_code: str,
+    existing_max_sno: int,
+    reference_date_str: str,
+    opener: urllib.request.OpenerDirector,
+    probe_count: int = 4,
+) -> list[dict[str, str]]:
+    """當官網賽程頁未直接回傳時，試探後續場次編號是否有有效比賽資料並自動補登。"""
+    discovered: list[dict[str, str]] = []
+    try:
+        base_dt = datetime.strptime(reference_date_str[:10], "%Y-%m-%d")
+    except ValueError:
+        base_dt = datetime.strptime(WINTER_SEASON_START, "%Y-%m-%d")
+
+    for offset in range(1, probe_count + 1):
+        cand_sno = existing_max_sno + offset
+        cand_date = (base_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
+        if not (WINTER_SEASON_START <= cand_date <= WINTER_SEASON_END):
+            continue
+        wkey = _resolve_week_key_for_date(cand_date)
+        if not wkey:
+            continue
+        try:
+            res_json = fetch_awb_box_live(year, kind_code, cand_sno, opener=opener)
+            meta = extract_game_meta(res_json, year)
+            gdate = meta.get("game_date", "")
+            if WINTER_SEASON_START <= gdate <= WINTER_SEASON_END:
+                gkey = f"{year}_{kind_code}_{cand_sno}"
+                discovered.append(
+                    {
+                        "game_key": gkey,
+                        "year": str(year),
+                        "kind_code": str(kind_code),
+                        "game_sno": str(cand_sno),
+                        "game_date": gdate,
+                        "start_time": meta.get("start_time", ""),
+                        "away_team": meta.get("away_team", ""),
+                        "home_team": meta.get("home_team", ""),
+                        "week_key": _resolve_week_key_for_date(gdate),
+                    }
+                )
+        except Exception:
+            continue
+
+    return discovered
+
+
 def sync_awb_schedule(
     year: str | int = "2026",
     kind_code: str = "P",
     db_path: str = DB_PATH,
 ) -> dict[str, Any]:
-    """自動抓冬盟賽程並寫入 cpbl_games（保留既有 week_key 或依日期自動歸入第1/第2週）。"""
-    fetched_games = fetch_awb_schedule(year=year, kind_code=kind_code)
+    """自動抓冬盟賽程並寫入 cpbl_games（保留既有 week_key 或依日期自動歸入第1/第2週；官網抓不到時亦會試探後續場次）。"""
+    opener = build_cpbl_opener()
+    fetched_games = fetch_awb_schedule(year=year, kind_code=kind_code, opener=opener)
+
     conn = sqlite3.connect(db_path, timeout=30)
     cur = conn.cursor()
     _ensure_tables_for_fetcher(cur)
+
+    cur.execute("""
+        SELECT game_sno, game_date
+        FROM cpbl_games
+        WHERE year = ? AND kind_code = ?
+          AND game_sno GLOB '[0-9]*'
+          AND game_date BETWEEN ? AND ?
+    """, (str(year), str(kind_code), WINTER_SEASON_START, WINTER_SEASON_END))
+    db_games = cur.fetchall()
+
+    max_sno = 0
+    latest_date = WINTER_SEASON_START
+    for sno_val, d_val in db_games:
+        if str(sno_val).isdigit():
+            max_sno = max(max_sno, int(sno_val))
+        if d_val and str(d_val) > latest_date:
+            latest_date = str(d_val)[:10]
+
+    for g in fetched_games:
+        if str(g.get("game_sno", "")).isdigit():
+            max_sno = max(max_sno, int(g["game_sno"]))
+        if g.get("game_date") and g["game_date"] > latest_date:
+            latest_date = g["game_date"]
+
+    if max_sno > 0:
+        probed = _probe_next_awb_games(
+            year=year,
+            kind_code=kind_code,
+            existing_max_sno=max_sno,
+            reference_date_str=latest_date,
+            opener=opener,
+            probe_count=3,
+        )
+        existing_keys = {x["game_key"] for x in fetched_games}
+        for pg in probed:
+            if pg["game_key"] not in existing_keys:
+                fetched_games.append(pg)
+                existing_keys.add(pg["game_key"])
 
     now_iso = datetime.now().isoformat(timespec="seconds")
     synced_count = 0
