@@ -509,6 +509,7 @@ def parse_game_stats(
                 "sv": 0,
                 "pitch_h": 0,
                 "pitch_bb": 0,
+                "pitch_hbp": 0,
             }
         if team_name and not by_name[name]["team_name"]:
             by_name[name]["team_name"] = team_name
@@ -609,6 +610,11 @@ def parse_game_stats(
             if row.get("BasesONBallsCnt") is not None
             else row.get("BaseOnBallsCnt")
         )
+        entry["pitch_hbp"] += _get_first_int(
+            row,
+            ("HitBYPitchCnt", "HitByPitchCnt", "HbpCnt", "DeadBallCnt", "HBPCnt", "HBP"),
+            0,
+        )
 
     for item in by_name.values():
         item["positions"] = sorted(item["positions"])
@@ -662,9 +668,21 @@ def _ensure_tables_for_fetcher(cur: sqlite3.Cursor) -> None:
             sv INTEGER DEFAULT 0,
             pitch_h INTEGER DEFAULT 0,
             pitch_bb INTEGER DEFAULT 0,
+            pitch_hbp INTEGER DEFAULT 0,
             PRIMARY KEY (player_id, stat_date, game_key)
         )
     """)
+    cur.execute("PRAGMA table_info(player_game_stats)")
+    pg_cols = {r[1] for r in cur.fetchall()}
+    if "pitch_hbp" not in pg_cols:
+        cur.execute("ALTER TABLE player_game_stats ADD COLUMN pitch_hbp INTEGER DEFAULT 0")
+
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='player_daily_stats'")
+    if cur.fetchone():
+        cur.execute("PRAGMA table_info(player_daily_stats)")
+        pd_cols = {r[1] for r in cur.fetchall()}
+        if "pitch_hbp" not in pd_cols:
+            cur.execute("ALTER TABLE player_daily_stats ADD COLUMN pitch_hbp INTEGER DEFAULT 0")
 
 
 def cleanup_stale_winter_games(db_path: str = DB_PATH) -> dict[str, Any]:
@@ -703,7 +721,8 @@ def cleanup_stale_winter_games(db_path: str = DB_PATH) -> dict[str, Any]:
                         COALESCE(SUM(rbi), 0), COALESCE(SUM(sb), 0), COALESCE(SUM(hr), 0),
                         COALESCE(SUM(tb), 0), COALESCE(SUM(w), 0), COALESCE(SUM(ip), 0.0),
                         COALESCE(SUM(er), 0), COALESCE(SUM(k), 0), COALESCE(SUM(hld), 0),
-                        COALESCE(SUM(sv), 0), COALESCE(SUM(pitch_h), 0), COALESCE(SUM(pitch_bb), 0)
+                        COALESCE(SUM(sv), 0), COALESCE(SUM(pitch_h), 0), COALESCE(SUM(pitch_bb), 0),
+                        COALESCE(SUM(pitch_hbp), 0)
                     FROM player_game_stats
                     WHERE player_id = ? AND stat_date = ?
                 """, (pid, d_str))
@@ -713,8 +732,8 @@ def cleanup_stale_winter_games(db_path: str = DB_PATH) -> dict[str, Any]:
                         INSERT OR REPLACE INTO player_daily_stats (
                             player_id, stat_date,
                             r, ab, h, bb, hbp, sf, rbi, sb, hr, tb,
-                            w, ip, er, k, hld, sv, pitch_h, pitch_bb
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            w, ip, er, k, hld, sv, pitch_h, pitch_bb, pitch_hbp
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (pid, d_str, *agg))
                 else:
                     cur.execute("DELETE FROM player_daily_stats WHERE player_id = ? AND stat_date = ?", (pid, d_str))
@@ -885,7 +904,8 @@ def _sync_daily_stats_from_games(cur: sqlite3.Cursor, player_ids: list[str], dat
                     COALESCE(SUM(rbi), 0), COALESCE(SUM(sb), 0), COALESCE(SUM(hr), 0),
                     COALESCE(SUM(tb), 0), COALESCE(SUM(w), 0), COALESCE(SUM(ip), 0.0),
                     COALESCE(SUM(er), 0), COALESCE(SUM(k), 0), COALESCE(SUM(hld), 0),
-                    COALESCE(SUM(sv), 0), COALESCE(SUM(pitch_h), 0), COALESCE(SUM(pitch_bb), 0)
+                    COALESCE(SUM(sv), 0), COALESCE(SUM(pitch_h), 0), COALESCE(SUM(pitch_bb), 0),
+                    COALESCE(SUM(pitch_hbp), 0)
                 FROM player_game_stats
                 WHERE player_id = ? AND stat_date = ?
             """, (pid, d_str))
@@ -894,8 +914,8 @@ def _sync_daily_stats_from_games(cur: sqlite3.Cursor, player_ids: list[str], dat
                 INSERT OR REPLACE INTO player_daily_stats (
                     player_id, stat_date,
                     r, ab, h, bb, hbp, sf, rbi, sb, hr, tb,
-                    w, ip, er, k, hld, sv, pitch_h, pitch_bb
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    w, ip, er, k, hld, sv, pitch_h, pitch_bb, pitch_hbp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (pid, d_str, *agg))
 
 
@@ -1045,6 +1065,7 @@ def save_parsed_stats(
                 stats["sv"],
                 stats["pitch_h"],
                 stats["pitch_bb"],
+                stats.get("pitch_hbp", 0),
             )
         )
 
@@ -1054,8 +1075,8 @@ def save_parsed_stats(
             INSERT OR REPLACE INTO player_game_stats (
                 player_id, stat_date, game_key,
                 r, ab, h, bb, hbp, sf, rbi, sb, hr, tb,
-                w, ip, er, k, hld, sv, pitch_h, pitch_bb
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                w, ip, er, k, hld, sv, pitch_h, pitch_bb, pitch_hbp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             row,
         )
