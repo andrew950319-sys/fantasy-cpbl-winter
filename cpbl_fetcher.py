@@ -14,7 +14,7 @@ AWB_LIVE_URL = "https://awb.cpbl.com.tw/box/getlive"
 AWB_KIND_CODES = {"P", "AWB", "WINTER"}
 ALLOWED_WINTER_TEAMS = {"台灣海洋", "台灣山林"}
 WINTER_SEASON_START = "2026-11-23"
-WINTER_SEASON_END = "2026-12-03"
+WINTER_SEASON_END = "2026-12-04"
 
 
 def _is_awb_kind(kind_code: str | int) -> bool:
@@ -83,8 +83,8 @@ def _normalize_date_str(raw_date: str, fallback_year: str | int) -> str:
 def _resolve_week_key_for_date(gdate: str) -> str:
     if "2026-11-23" <= gdate <= "2026-11-29":
         return "2026-11-23_2026-11-29"
-    if "2026-11-30" <= gdate <= "2026-12-03":
-        return "2026-11-30_2026-12-03"
+    if "2026-11-30" <= gdate <= "2026-12-04":
+        return "2026-11-30_2026-12-04"
     return ""
 
 
@@ -686,7 +686,7 @@ def _ensure_tables_for_fetcher(cur: sqlite3.Cursor) -> None:
 
 
 def cleanup_stale_winter_games(db_path: str = DB_PATH) -> dict[str, Any]:
-    """刪除冬盟賽季區間（2026-11-23 ~ 2026-12-03）之外或非數字場次編號的無關測試賽程與對應單場數據。"""
+    """刪除冬盟賽季區間（2026-11-23 ~ 2026-12-04）之外或非數字場次編號的無關測試賽程與對應單場數據。"""
     conn = sqlite3.connect(db_path, timeout=30)
     cur = conn.cursor()
     _ensure_tables_for_fetcher(cur)
