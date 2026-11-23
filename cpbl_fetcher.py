@@ -755,7 +755,7 @@ def _probe_next_awb_games(
     existing_max_sno: int,
     reference_date_str: str,
     opener: urllib.request.OpenerDirector,
-    probe_count: int = 4,
+    probe_count: int = 8,
 ) -> list[dict[str, str]]:
     """當官網賽程頁未直接回傳時，試探後續場次編號是否有有效比賽資料並自動補登。"""
     discovered: list[dict[str, str]] = []
@@ -764,13 +764,17 @@ def _probe_next_awb_games(
     except ValueError:
         base_dt = datetime.strptime(WINTER_SEASON_START, "%Y-%m-%d")
 
-    for offset in range(1, probe_count + 1):
-        cand_sno = existing_max_sno + offset
-        cand_date = (base_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
+    start_sno = existing_max_sno + 1
+    end_sno = max(existing_max_sno + probe_count, 50)
+
+    for cand_sno in range(start_sno, end_sno + 1):
+        step = cand_sno - existing_max_sno
+        cand_date = (base_dt + timedelta(days=step)).strftime("%Y-%m-%d")
+        if cand_date > WINTER_SEASON_END:
+            cand_date = WINTER_SEASON_END
         if not (WINTER_SEASON_START <= cand_date <= WINTER_SEASON_END):
             continue
-        wkey = _resolve_week_key_for_date(cand_date)
-        if not wkey:
+        if not _resolve_week_key_for_date(cand_date):
             continue
         try:
             res_json = fetch_awb_box_live(year, kind_code, cand_sno, opener=opener)
@@ -840,7 +844,7 @@ def sync_awb_schedule(
             existing_max_sno=max_sno,
             reference_date_str=latest_date,
             opener=opener,
-            probe_count=3,
+            probe_count=8,
         )
         existing_keys = {x["game_key"] for x in fetched_games}
         for pg in probed:
