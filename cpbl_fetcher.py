@@ -39,6 +39,17 @@ def _to_float(val: Any, default: float = 0.0) -> float:
         return default
 
 
+def _get_first_int(row: dict[str, Any], keys: tuple[str, ...], default: int = 0) -> int:
+    lower_map = {str(k).lower(): v for k, v in row.items()}
+    for k in keys:
+        if k in row and row[k] is not None and str(row[k]).strip() != "":
+            return _to_int(row[k], default)
+        lk = k.lower()
+        if lk in lower_map and lower_map[lk] is not None and str(lower_map[lk]).strip() != "":
+            return _to_int(lower_map[lk], default)
+    return default
+
+
 def build_cpbl_opener() -> urllib.request.OpenerDirector:
     cj = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
@@ -121,7 +132,6 @@ def _extract_games_from_text_or_json(
             }
         )
 
-    # 1. 嘗試解析 JSON 結構（若端點直接回傳 JSON 或內嵌 JSON）
     stripped = (content or "").strip()
     if stripped.startswith("{") or stripped.startswith("["):
         try:
@@ -184,7 +194,6 @@ def _extract_games_from_text_or_json(
         except Exception:
             pass
 
-    # 2. 從 HTML 擷取 gameSno 與日期、時間、隊伍
     for m in re.finditer(r"(?:gameSno|GameSno)=([0-9]+)", content, flags=re.IGNORECASE):
         sno = m.group(1).strip()
         start_idx = max(0, m.start() - 500)
@@ -273,63 +282,32 @@ def _parse_awb_ip_from_row(row: dict[str, Any]) -> float:
 
 
 def _extract_awb_batting_counts(row: dict[str, Any]) -> dict[str, int]:
-    """解析冬盟打者數據並做 AB / H 防呆。"""
-    ab = _to_int(
-        row.get("AtBatsCnt") if row.get("AtBatsCnt") is not None else row.get("HitCnt"),
-        0,
-    )
+    """解析冬盟打者數據並做 AB / H / HBP 防呆。"""
+    ab = _get_first_int(row, ("AtBatsCnt", "HitCnt", "AB"), 0)
 
-    h1 = _to_int(row.get("OneBaseHitCnt"), 0)
-    h2 = _to_int(row.get("TwoBaseHitCnt"), 0)
-    h3 = _to_int(row.get("ThreeBaseHitCnt"), 0)
-    hr = _to_int(
-        row.get("HomeRunCnt") if row.get("HomeRunCnt") is not None else row.get("HR"),
-        0,
-    )
+    h1 = _get_first_int(row, ("OneBaseHitCnt", "SingleCnt", "1B"), 0)
+    h2 = _get_first_int(row, ("TwoBaseHitCnt", "DoubleCnt", "2B"), 0)
+    h3 = _get_first_int(row, ("ThreeBaseHitCnt", "TripleCnt", "3B"), 0)
+    hr = _get_first_int(row, ("HomeRunCnt", "HR"), 0)
     sum_hits = h1 + h2 + h3 + hr
 
-    raw_h = (
-        row.get("HittingCnt")
-        if row.get("HittingCnt") is not None
-        else row.get("HitCnt")
-    )
+    raw_h = row.get("HittingCnt") if row.get("HittingCnt") is not None else row.get("HitCnt")
     h = _to_int(raw_h, sum_hits)
     if sum_hits > 0 and (raw_h is None or str(raw_h).strip() == "" or h != sum_hits):
         if sum_hits <= ab:
             h = sum_hits
 
-    bb = _to_int(
-        row.get("BaseOnBallsCnt")
-        if row.get("BaseOnBallsCnt") is not None
-        else row.get("BasesONBallsCnt"),
+    bb = _get_first_int(row, ("BaseOnBallsCnt", "BasesONBallsCnt", "BBCnt", "BB"), 0)
+    hbp = _get_first_int(
+        row,
+        ("HitByPitchCnt", "HitBYPitchCnt", "HbpCnt", "DeadBallCnt", "HBPCnt", "HBP"),
         0,
     )
-    hbp = _to_int(
-        row.get("HitByPitchCnt")
-        if row.get("HitByPitchCnt") is not None
-        else row.get("HitBYPitchCnt"),
-        0,
-    )
-    sf = _to_int(row.get("SacrificeFlyCnt"), 0)
-    rbi = _to_int(
-        row.get("RunsBattedInCnt")
-        if row.get("RunsBattedInCnt") is not None
-        else row.get("RunBattedINCnt"),
-        0,
-    )
-    r = _to_int(
-        row.get("RunScoredCnt")
-        if row.get("RunScoredCnt") is not None
-        else row.get("ScoreCnt"),
-        0,
-    )
-    sb = _to_int(row.get("StealBaseOKCnt"), 0)
-    tb = _to_int(
-        row.get("TotalBasesCnt")
-        if row.get("TotalBasesCnt") is not None
-        else row.get("TotalBases"),
-        0,
-    )
+    sf = _get_first_int(row, ("SacrificeFlyCnt", "SFCnt", "SF"), 0)
+    rbi = _get_first_int(row, ("RunsBattedInCnt", "RunBattedINCnt", "RBICnt", "RBI"), 0)
+    r = _get_first_int(row, ("RunScoredCnt", "ScoreCnt", "RCnt", "R"), 0)
+    sb = _get_first_int(row, ("StealBaseOKCnt", "SBCnt", "SB"), 0)
+    tb = _get_first_int(row, ("TotalBasesCnt", "TotalBases", "TBCnt", "TB"), 0)
     if tb == 0 and sum_hits > 0:
         tb = h1 + (h2 * 2) + (h3 * 3) + (hr * 4)
 
@@ -566,16 +544,16 @@ def parse_game_stats(
             entry["hr"] += b_stats["hr"]
             entry["tb"] += b_stats["tb"]
         else:
-            entry["r"] += _to_int(row.get("ScoreCnt"))
-            entry["ab"] += _to_int(row.get("HitCnt"))
-            entry["h"] += _to_int(row.get("HittingCnt"))
-            entry["bb"] += _to_int(row.get("BasesONBallsCnt"))
-            entry["hbp"] += _to_int(row.get("HitBYPitchCnt"))
-            entry["sf"] += _to_int(row.get("SacrificeFlyCnt"))
-            entry["rbi"] += _to_int(row.get("RunBattedINCnt"))
-            entry["sb"] += _to_int(row.get("StealBaseOKCnt"))
-            entry["hr"] += _to_int(row.get("HomeRunCnt"))
-            entry["tb"] += _to_int(row.get("TotalBases"))
+            entry["r"] += _get_first_int(row, ("ScoreCnt", "RunScoredCnt", "R"), 0)
+            entry["ab"] += _get_first_int(row, ("HitCnt", "AtBatsCnt", "AB"), 0)
+            entry["h"] += _get_first_int(row, ("HittingCnt", "H"), 0)
+            entry["bb"] += _get_first_int(row, ("BasesONBallsCnt", "BaseOnBallsCnt", "BB"), 0)
+            entry["hbp"] += _get_first_int(row, ("HitBYPitchCnt", "HitByPitchCnt", "HbpCnt", "DeadBallCnt", "HBP"), 0)
+            entry["sf"] += _get_first_int(row, ("SacrificeFlyCnt", "SF"), 0)
+            entry["rbi"] += _get_first_int(row, ("RunBattedINCnt", "RunsBattedInCnt", "RBI"), 0)
+            entry["sb"] += _get_first_int(row, ("StealBaseOKCnt", "SB"), 0)
+            entry["hr"] += _get_first_int(row, ("HomeRunCnt", "HR"), 0)
+            entry["tb"] += _get_first_int(row, ("TotalBases", "TotalBasesCnt", "TB"), 0)
 
     for row in pit_list:
         name = str(
@@ -705,8 +683,6 @@ def cleanup_stale_winter_games(db_path: str = DB_PATH) -> dict[str, Any]:
 
     if stale_keys:
         placeholders = ",".join("?" for _ in stale_keys)
-        cur.execute("PRAGMA name_list")
-        # 清理 player_game_stats 並重算受影響的 player_daily_stats
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='player_game_stats'")
         if cur.fetchone():
             cur.execute(f"""
