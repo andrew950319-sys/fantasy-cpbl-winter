@@ -13,6 +13,8 @@ AWB_SCHEDULE_URL = "https://awb.cpbl.com.tw/schedule"
 AWB_LIVE_URL = "https://awb.cpbl.com.tw/box/getlive"
 AWB_KIND_CODES = {"P", "AWB", "WINTER"}
 ALLOWED_WINTER_TEAMS = {"台灣海洋", "台灣山林"}
+WINTER_SEASON_START = "2026-11-23"
+WINTER_SEASON_END = "2026-12-03"
 
 
 def _is_awb_kind(kind_code: str | int) -> bool:
@@ -63,8 +65,6 @@ def _normalize_date_str(raw_date: str, fallback_year: str | int) -> str:
     if m_short:
         mo, da = m_short.groups()
         yr = int(fallback_year)
-        if int(mo) == 12 and yr == 2026:
-            yr = 2026
         return f"{yr:04d}-{int(mo):02d}-{int(da):02d}"
     return ""
 
@@ -77,31 +77,119 @@ def _resolve_week_key_for_date(gdate: str) -> str:
     return ""
 
 
-def fetch_awb_schedule(
-    year: str | int = "2026",
-    kind_code: str = "P",
-    opener: urllib.request.OpenerDirector | None = None,
+def _extract_games_from_text_or_json(
+    content: str,
+    year: str | int,
+    kind_code: str,
 ) -> list[dict[str, str]]:
-    """抓取冬盟官網賽程頁並解析場次（日期、場次編號、客隊、主隊、開賽時間）。"""
-    if opener is None:
-        opener = build_cpbl_opener()
-
-    url = f"{AWB_SCHEDULE_URL}?year={year}&kindCode={kind_code}"
-    req = urllib.request.Request(url, method="GET")
-    with opener.open(req, timeout=20) as resp:
-        html = resp.read().decode("utf-8", errors="replace")
-
     games: list[dict[str, str]] = []
     seen_keys: set[str] = set()
 
-    # 1. 嘗試從 HTML 中擷取包含 gameSno 與日期的連結或屬性
-    for m in re.finditer(
-        r"(?:gameSno|GameSno)=([0-9]+)", html, flags=re.IGNORECASE
-    ):
+    def add_game(
+        sno: str,
+        gdate: str,
+        start_time: str = "",
+        away_team: str = "",
+        home_team: str = "",
+    ) -> None:
+        sno_clean = str(sno or "").strip()
+        date_clean = _normalize_date_str(gdate, year)
+        if not sno_clean or not date_clean:
+            return
+        wkey = _resolve_week_key_for_date(date_clean)
+        if not wkey:
+            return
+        gkey = f"{year}_{kind_code}_{sno_clean}"
+        if gkey in seen_keys:
+            return
+        seen_keys.add(gkey)
+        st_clean = str(start_time or "").strip()
+        if st_clean and len(st_clean) <= 8 and ":" in st_clean:
+            hh_mm_ss = st_clean if len(st_clean) == 8 else f"{st_clean}:00"
+            st_clean = f"{date_clean} {hh_mm_ss}"
+        games.append(
+            {
+                "game_key": gkey,
+                "year": str(year),
+                "kind_code": str(kind_code),
+                "game_sno": sno_clean,
+                "game_date": date_clean,
+                "start_time": st_clean,
+                "away_team": str(away_team or "").strip(),
+                "home_team": str(home_team or "").strip(),
+                "week_key": wkey,
+            }
+        )
+
+    # 1. 嘗試解析 JSON 結構（若端點直接回傳 JSON 或內嵌 JSON）
+    stripped = (content or "").strip()
+    if stripped.startswith("{") or stripped.startswith("["):
+        try:
+            data = json.loads(stripped)
+            candidates: list[dict[str, Any]] = []
+            if isinstance(data, list):
+                candidates = [x for x in data if isinstance(x, dict)]
+            elif isinstance(data, dict):
+                for k in ("games", "Games", "data", "Data", "schedule", "Schedule", "list", "List"):
+                    v = data.get(k)
+                    if isinstance(v, list):
+                        candidates.extend([x for x in v if isinstance(x, dict)])
+                    elif isinstance(v, str) and v.strip().startswith("["):
+                        try:
+                            sub = json.loads(v)
+                            if isinstance(sub, list):
+                                candidates.extend([x for x in sub if isinstance(x, dict)])
+                        except Exception:
+                            pass
+            for item in candidates:
+                sno = (
+                    item.get("GameSno")
+                    or item.get("gameSno")
+                    or item.get("GameSeqNo")
+                    or item.get("Sno")
+                    or item.get("game_sno")
+                    or ""
+                )
+                gdate = (
+                    item.get("GameDate")
+                    or item.get("gameDate")
+                    or item.get("Date")
+                    or item.get("game_date")
+                    or ""
+                )
+                stime = (
+                    item.get("GameTime")
+                    or item.get("StartTime")
+                    or item.get("PlayTime")
+                    or item.get("start_time")
+                    or ""
+                )
+                away = (
+                    item.get("VisitingTeamName")
+                    or item.get("AwayTeamName")
+                    or item.get("VisitingClubName")
+                    or item.get("away_team")
+                    or ""
+                )
+                home = (
+                    item.get("HomeTeamName")
+                    or item.get("HostTeamName")
+                    or item.get("HomeClubName")
+                    or item.get("home_team")
+                    or ""
+                )
+                add_game(str(sno), str(gdate), str(stime), str(away), str(home))
+            if games:
+                return games
+        except Exception:
+            pass
+
+    # 2. 從 HTML 擷取 gameSno 與日期、時間、隊伍
+    for m in re.finditer(r"(?:gameSno|GameSno)=([0-9]+)", content, flags=re.IGNORECASE):
         sno = m.group(1).strip()
-        start_idx = max(0, m.start() - 400)
-        end_idx = min(len(html), m.end() + 400)
-        window_text = re.sub(r"<[^>]+>", " ", html[start_idx:end_idx])
+        start_idx = max(0, m.start() - 500)
+        end_idx = min(len(content), m.end() + 500)
+        window_text = re.sub(r"<[^>]+>", " ", content[start_idx:end_idx])
         window_text = re.sub(r"\s+", " ", window_text).strip()
 
         gdate = _normalize_date_str(window_text, year)
@@ -120,25 +208,41 @@ def fetch_awb_schedule(
                 elif team_cand != away_team and not home_team:
                     home_team = team_cand
 
-        wkey = _resolve_week_key_for_date(gdate)
-        gkey = f"{year}_{kind_code}_{sno}"
-        if gkey in seen_keys:
-            continue
-        seen_keys.add(gkey)
-        games.append(
-            {
-                "game_key": gkey,
-                "year": str(year),
-                "kind_code": str(kind_code),
-                "game_sno": sno,
-                "game_date": gdate,
-                "start_time": start_time,
-                "away_team": away_team,
-                "home_team": home_team,
-                "week_key": wkey,
-            }
-        )
+        add_game(sno, gdate, start_time, away_team, home_team)
 
+    return games
+
+
+def fetch_awb_schedule(
+    year: str | int = "2026",
+    kind_code: str = "P",
+    opener: urllib.request.OpenerDirector | None = None,
+) -> list[dict[str, str]]:
+    """抓取冬盟官網賽程（嘗試賽程頁與常見賽程 AJAX 端點，並過濾冬盟期間場次）。"""
+    if opener is None:
+        opener = build_cpbl_opener()
+
+    candidate_urls = [
+        f"{AWB_SCHEDULE_URL}?year={year}&kindCode={kind_code}",
+        f"{AWB_BASE_URL}/schedule/getschedule?year={year}&kindCode={kind_code}",
+        f"{AWB_BASE_URL}/schedule/getlist?year={year}&kindCode={kind_code}",
+    ]
+
+    all_games: dict[str, dict[str, str]] = {}
+    for url in candidate_urls:
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with opener.open(req, timeout=20) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            extracted = _extract_games_from_text_or_json(body, year, kind_code)
+            for g in extracted:
+                all_games[g["game_key"]] = g
+            if all_games:
+                break
+        except Exception:
+            continue
+
+    games = list(all_games.values())
     games.sort(key=lambda x: (x["game_date"], int(x["game_sno"]) if x["game_sno"].isdigit() else 0))
     return games
 
@@ -583,6 +687,71 @@ def _ensure_tables_for_fetcher(cur: sqlite3.Cursor) -> None:
     """)
 
 
+def cleanup_stale_winter_games(db_path: str = DB_PATH) -> dict[str, Any]:
+    """刪除冬盟賽季區間（2026-11-23 ~ 2026-12-03）之外或非數字場次編號的無關測試賽程與對應單場數據。"""
+    conn = sqlite3.connect(db_path, timeout=30)
+    cur = conn.cursor()
+    _ensure_tables_for_fetcher(cur)
+
+    cur.execute("""
+        SELECT game_key, game_date, game_sno
+        FROM cpbl_games
+        WHERE game_date < ? OR game_date > ?
+           OR TRIM(COALESCE(game_sno, '')) = ''
+           OR game_sno GLOB '*[^0-9]*'
+    """, (WINTER_SEASON_START, WINTER_SEASON_END))
+    stale_rows = cur.fetchall()
+    stale_keys = [r[0] for r in stale_rows]
+
+    if stale_keys:
+        placeholders = ",".join("?" for _ in stale_keys)
+        cur.execute("PRAGMA name_list")
+        # 清理 player_game_stats 並重算受影響的 player_daily_stats
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='player_game_stats'")
+        if cur.fetchone():
+            cur.execute(f"""
+                SELECT DISTINCT player_id, stat_date
+                FROM player_game_stats
+                WHERE game_key IN ({placeholders})
+            """, stale_keys)
+            affected = cur.fetchall()
+            cur.execute(f"DELETE FROM player_game_stats WHERE game_key IN ({placeholders})", stale_keys)
+
+            for pid, d_str in affected:
+                cur.execute("""
+                    SELECT
+                        COALESCE(SUM(r), 0), COALESCE(SUM(ab), 0), COALESCE(SUM(h), 0),
+                        COALESCE(SUM(bb), 0), COALESCE(SUM(hbp), 0), COALESCE(SUM(sf), 0),
+                        COALESCE(SUM(rbi), 0), COALESCE(SUM(sb), 0), COALESCE(SUM(hr), 0),
+                        COALESCE(SUM(tb), 0), COALESCE(SUM(w), 0), COALESCE(SUM(ip), 0.0),
+                        COALESCE(SUM(er), 0), COALESCE(SUM(k), 0), COALESCE(SUM(hld), 0),
+                        COALESCE(SUM(sv), 0), COALESCE(SUM(pitch_h), 0), COALESCE(SUM(pitch_bb), 0)
+                    FROM player_game_stats
+                    WHERE player_id = ? AND stat_date = ?
+                """, (pid, d_str))
+                agg = cur.fetchone()
+                if any((x or 0) != 0 for x in agg):
+                    cur.execute("""
+                        INSERT OR REPLACE INTO player_daily_stats (
+                            player_id, stat_date,
+                            r, ab, h, bb, hbp, sf, rbi, sb, hr, tb,
+                            w, ip, er, k, hld, sv, pitch_h, pitch_bb
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (pid, d_str, *agg))
+                else:
+                    cur.execute("DELETE FROM player_daily_stats WHERE player_id = ? AND stat_date = ?", (pid, d_str))
+
+        cur.execute(f"DELETE FROM cpbl_games WHERE game_key IN ({placeholders})", stale_keys)
+
+    conn.commit()
+    conn.close()
+    return {
+        "ok": True,
+        "removed_games_count": len(stale_keys),
+        "removed_game_keys": stale_keys,
+    }
+
+
 def sync_awb_schedule(
     year: str | int = "2026",
     kind_code: str = "P",
@@ -600,8 +769,9 @@ def sync_awb_schedule(
 
     for g in fetched_games:
         wkey = g.get("week_key") or _resolve_week_key_for_date(g["game_date"])
-        if wkey:
-            week_matched_count += 1
+        if not wkey:
+            continue
+        week_matched_count += 1
         cur.execute("""
             INSERT INTO cpbl_games (
                 game_key, year, kind_code, game_sno, game_date, start_time, away_team, home_team, week_key, updated_at

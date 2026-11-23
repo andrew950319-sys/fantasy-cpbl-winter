@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from cpbl_fetcher import import_cpbl_game, sync_awb_schedule
+from cpbl_fetcher import cleanup_stale_winter_games, import_cpbl_game, sync_awb_schedule
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
@@ -397,6 +397,14 @@ def run_auto_fetch_due_games(force_all: bool = False, sync_schedule: bool = True
         today_str = now_dt.strftime("%Y-%m-%d")
         now_iso = now_dt.isoformat(timespec="seconds")
 
+        clean_msg = ""
+        try:
+            cleaned = cleanup_stale_winter_games(db_path="fantasy_league.db")
+            if cleaned.get("removed_games_count"):
+                clean_msg = f"清舊賽程 {cleaned['removed_games_count']} 場｜"
+        except Exception:
+            pass
+
         schedule_msg = ""
         if sync_schedule:
             try:
@@ -428,7 +436,7 @@ def run_auto_fetch_due_games(force_all: bool = False, sync_schedule: bool = True
             due_games.append(g)
 
         if not due_games:
-            summary = f"{schedule_msg}｜無到期需抓數的場次（已檢查 {len(games)} 筆賽程）"
+            summary = f"{clean_msg}{schedule_msg}｜無到期需抓數的場次（已檢查 {len(games)} 筆賽程）"
             auto_fetch_status["last_run_at"] = now_iso
             auto_fetch_status["last_summary"] = summary
             return {"ok": True, "fetched_count": 0, "errors": [], "summary": summary}
@@ -456,7 +464,7 @@ def run_auto_fetch_due_games(force_all: bool = False, sync_schedule: bool = True
             except Exception as exc:
                 errors.append(f"{g['game_date']} #{g['game_sno']}: {exc}")
 
-        summary = f"{schedule_msg}｜抓成績 {fetched_count}/{len(due_games)} 場" + (f"（{len(errors)} 筆失敗）" if errors else "")
+        summary = f"{clean_msg}{schedule_msg}｜抓成績 {fetched_count}/{len(due_games)} 場" + (f"（{len(errors)} 筆失敗）" if errors else "")
         auto_fetch_status["last_run_at"] = now_iso
         auto_fetch_status["last_summary"] = summary
         return {
@@ -1510,6 +1518,16 @@ def api_seed_winter_test(payload: SeedWinterPayload):
         })
     finally:
         conn.close()
+
+
+@app.post("/api/admin/cleanup-stale-games")
+def api_cleanup_stale_games():
+    denied = ensure_admin_enabled()
+    if denied:
+        return denied
+
+    res = cleanup_stale_winter_games(db_path="fantasy_league.db")
+    return JSONResponse(res)
 
 
 @app.post("/api/admin/cleanup-winter-test")
