@@ -182,6 +182,7 @@ class LineupMovePayload(BaseModel):
     lineup_slot: str = "BN"
     reason: str = ""
     force_override: bool = False
+    target_date: str | None = None
 
 
 class SignFreeAgentPayload(BaseModel):
@@ -663,10 +664,29 @@ def _has_game_stats_imported(cursor, game_key: str, game_date: str) -> bool:
     return cursor.fetchone() is not None
 
 
+def _parse_game_start_dt(game_date_str: str, start_time_str: str) -> datetime | None:
+    st_str = (start_time_str or "").strip()
+    g_date = (game_date_str or "").strip()
+    if not st_str:
+        return None
+    try:
+        return datetime.fromisoformat(st_str)
+    except ValueError:
+        pass
+    for fmt in ("%H:%M", "%H:%M:%S"):
+        try:
+            t_obj = datetime.strptime(st_str, fmt).time()
+            d_obj = date.fromisoformat(g_date)
+            return datetime.combine(d_obj, t_obj)
+        except ValueError:
+            continue
+    return None
+
+
 def is_game_locked_for_team(cursor, real_team: str | None, target_date: str | None = None) -> tuple[bool, str]:
     if not real_team:
         return False, ""
-    check_date = target_date or date.today().isoformat()
+    check_date = (target_date or date.today().isoformat()).strip()
     cursor.execute("""
         SELECT game_key, game_date, start_time, away_team, home_team
         FROM cpbl_games
@@ -676,18 +696,124 @@ def is_game_locked_for_team(cursor, real_team: str | None, target_date: str | No
     rows = cursor.fetchall()
     now_dt = datetime.now()
     for r in rows:
-        st_str = (r["start_time"] or "").strip()
-        if not st_str:
-            continue
-        try:
-            st_dt = datetime.fromisoformat(st_str)
-        except ValueError:
+        st_dt = _parse_game_start_dt(r["game_date"], r["start_time"])
+        if not st_dt:
             continue
         if now_dt >= st_dt:
             if _has_game_stats_imported(cursor, r["game_key"], r["game_date"]):
                 continue
-            return True, f"現實球隊【{real_team}】今日賽事已於 {st_dt.strftime('%H:%M')} 開賽且成績尚未入庫，該隊球員已鎖定（成績入庫後解鎖）"
+            return True, f"現實球隊【{real_team}】於 {r['game_date']} {st_dt.strftime('%H:%M')} 開賽且成績尚未入庫，該隊球員已鎖定（成績入庫後解鎖）"
     return False, ""
+
+
+def get_effective_lineup_map(cursor, fantasy_team: str, target_date: str | None = None) -> dict[str, dict]:
+    team_clean = (fantasy_team or "").strip()
+    if not team_clean:
+        return {}
+    eff_date = (target_date or date.today().isoformat()).strip()
+
+    # 1. 先查 target_date 當天；2. 若無則往回找 <= target_date 最近一天沿用；3. 皆無則退回 team_rosters 現況
+    cursor.execute("""
+        SELECT stat_date
+        FROM daily_lineups
+        WHERE TRIM(COALESCE(fantasy_team, '')) = ?
+          AND stat_date <= ?
+        ORDER BY stat_date DESC
+        LIMIT 1
+    """, (team_clean, eff_date))
+    picked_row = cursor.fetchone()
+
+    result: dict[str, dict] = {}
+    if picked_row:
+        picked_date = picked_row["stat_date"]
+        cursor.execute("""
+            SELECT player_id, roster_slot, lineup_slot
+            FROM daily_lineups
+            WHERE TRIM(COALESCE(fantasy_team, '')) = ?
+              AND stat_date = ?
+        """, (team_clean, picked_date))
+        for dl in cursor.fetchall():
+            r_slot = (dl["roster_slot"] or "ACTIVE").upper().strip()
+            l_slot = normalize_lineup_slot(dl["lineup_slot"])
+            result[dl["player_id"]] = {
+                "roster_slot": r_slot,
+                "lineup_slot": l_slot,
+                "source_date": picked_date,
+            }
+        return result
+
+    cursor.execute("""
+        SELECT player_id, roster_slot, lineup_slot
+        FROM team_rosters
+        WHERE TRIM(COALESCE(fantasy_team, '')) = ?
+    """, (team_clean,))
+    for tr in cursor.fetchall():
+        r_slot = (tr["roster_slot"] or "ACTIVE").upper().strip()
+        l_slot = normalize_lineup_slot(tr["lineup_slot"])
+        result[tr["player_id"]] = {
+            "roster_slot": r_slot,
+            "lineup_slot": l_slot,
+            "source_date": "ROSTER",
+        }
+    return result
+
+
+def save_daily_lineup_snapshot(cursor, fantasy_team: str, target_date: str, lineup_map: dict[str, dict] | None = None):
+    team_clean = (fantasy_team or "").strip()
+    date_clean = (target_date or date.today().isoformat()).strip()
+    if not team_clean or not date_clean:
+        return
+
+    if lineup_map is None:
+        cursor.execute("""
+            SELECT player_id, roster_slot, lineup_slot
+            FROM team_rosters
+            WHERE TRIM(COALESCE(fantasy_team, '')) = ?
+        """, (team_clean,))
+        snapshot_rows = [
+            (
+                team_clean,
+                date_clean,
+                r["player_id"],
+                (r["roster_slot"] or "ACTIVE").upper().strip(),
+                normalize_lineup_slot(r["lineup_slot"]),
+            )
+            for r in cursor.fetchall()
+        ]
+    else:
+        snapshot_rows = [
+            (
+                team_clean,
+                date_clean,
+                pid,
+                (info.get("roster_slot") or "ACTIVE").upper().strip(),
+                normalize_lineup_slot(info.get("lineup_slot")),
+            )
+            for pid, info in lineup_map.items()
+        ]
+
+    cursor.execute("""
+        DELETE FROM daily_lineups
+        WHERE TRIM(COALESCE(fantasy_team, '')) = ? AND stat_date = ?
+    """, (team_clean, date_clean))
+    if snapshot_rows:
+        cursor.executemany("""
+            INSERT INTO daily_lineups (fantasy_team, stat_date, player_id, roster_slot, lineup_slot, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, snapshot_rows)
+
+
+def _calc_empty_slot_penalties(lineup_map: dict[str, dict]) -> tuple[int, int]:
+    occupied_slots = {
+        normalize_lineup_slot(info.get("lineup_slot"))
+        for info in lineup_map.values()
+        if (info.get("roster_slot") or "").upper().strip() == "ACTIVE"
+        and normalize_lineup_slot(info.get("lineup_slot")) in SCORING_LINEUP_SLOTS
+    }
+    empty_batter_slots = sum(1 for s in LINEUP_SLOTS_BATTER if s not in occupied_slots)
+    empty_pitcher_slots = sum(1 for s in LINEUP_SLOTS_PITCHER if s not in occupied_slots)
+    # 野手先發空槽 +5 AB，投手先發空槽 +2 ER
+    return empty_batter_slots * 5, empty_pitcher_slots * 2
 
 
 def validate_roster_limits(
@@ -777,20 +903,7 @@ def calc_team_12_cats(fantasy_team: str, date_filter: str = "ALL", week_key: str
     conn = get_db()
     cursor = conn.cursor()
     ensure_extended_schema(cursor)
-
-    cursor.execute("""
-        SELECT p.player_id, r.roster_slot, r.lineup_slot
-        FROM players p
-        JOIN team_rosters r ON p.player_id = r.player_id
-        WHERE TRIM(COALESCE(r.fantasy_team, '')) = ?
-          AND UPPER(TRIM(COALESCE(r.roster_slot, ''))) = 'ACTIVE'
-    """, ((fantasy_team or "").strip(),))
-
-    scoring_pids = [
-        row["player_id"]
-        for row in cursor.fetchall()
-        if normalize_lineup_slot(row["lineup_slot"]) in SCORING_LINEUP_SLOTS
-    ]
+    team_clean = (fantasy_team or "").strip()
 
     agg = {
         "r": 0, "ab": 0, "h": 0, "bb": 0, "hbp": 0, "sf": 0,
@@ -799,46 +912,61 @@ def calc_team_12_cats(fantasy_team: str, date_filter: str = "ALL", week_key: str
         "pitch_h": 0, "pitch_bb": 0, "pitch_hbp": 0,
     }
 
-    if scoring_pids:
-        pid_placeholders = ",".join("?" for _ in scoring_pids)
-        sql = f"""
-            SELECT
-                COALESCE(SUM(r), 0) AS r,
-                COALESCE(SUM(ab), 0) AS ab,
-                COALESCE(SUM(h), 0) AS h,
-                COALESCE(SUM(bb), 0) AS bb,
-                COALESCE(SUM(hbp), 0) AS hbp,
-                COALESCE(SUM(sf), 0) AS sf,
-                COALESCE(SUM(rbi), 0) AS rbi,
-                COALESCE(SUM(sb), 0) AS sb,
-                COALESCE(SUM(hr), 0) AS hr,
-                COALESCE(SUM(tb), 0) AS tb,
-                COALESCE(SUM(w), 0) AS w,
-                COALESCE(SUM(ip), 0.0) AS ip,
-                COALESCE(SUM(er), 0) AS er,
-                COALESCE(SUM(k), 0) AS k,
-                COALESCE(SUM(hld), 0) AS hld,
-                COALESCE(SUM(sv), 0) AS sv,
-                COALESCE(SUM(pitch_h), 0) AS pitch_h,
-                COALESCE(SUM(pitch_bb), 0) AS pitch_bb,
-                COALESCE(SUM(pitch_hbp), 0) AS pitch_hbp
-            FROM player_daily_stats
-            WHERE player_id IN ({pid_placeholders})
-        """
-        params: list = list(scoring_pids)
-        if date_filter and date_filter != "ALL":
-            sql += " AND stat_date = ?"
-            params.append(date_filter)
-        elif week_key and week_key in SCHEDULE_WEEK_MAP:
-            w = SCHEDULE_WEEK_MAP[week_key]
-            sql += " AND stat_date >= ? AND stat_date <= ?"
-            params.extend([w["start_date"], w["end_date"]])
+    if date_filter and date_filter != "ALL":
+        target_dates = [date_filter]
+    elif week_key and week_key in SCHEDULE_WEEK_MAP:
+        w = SCHEDULE_WEEK_MAP[week_key]
+        cursor.execute(
+            "SELECT DISTINCT stat_date FROM player_daily_stats WHERE stat_date >= ? AND stat_date <= ? ORDER BY stat_date ASC",
+            (w["start_date"], w["end_date"]),
+        )
+        target_dates = [r["stat_date"] for r in cursor.fetchall()]
+    else:
+        cursor.execute("SELECT DISTINCT stat_date FROM player_daily_stats ORDER BY stat_date ASC")
+        target_dates = [r["stat_date"] for r in cursor.fetchall()]
 
-        cursor.execute(sql, params)
-        fetched = cursor.fetchone()
-        if fetched:
-            for k in agg:
-                agg[k] = fetched[k] or 0
+    for d_str in target_dates:
+        lineup_map = get_effective_lineup_map(cursor, team_clean, d_str)
+        scoring_pids = [
+            pid
+            for pid, info in lineup_map.items()
+            if (info.get("roster_slot") or "").upper().strip() == "ACTIVE"
+            and normalize_lineup_slot(info.get("lineup_slot")) in SCORING_LINEUP_SLOTS
+        ]
+        if scoring_pids:
+            pid_placeholders = ",".join("?" for _ in scoring_pids)
+            cursor.execute(f"""
+                SELECT
+                    COALESCE(SUM(r), 0) AS r,
+                    COALESCE(SUM(ab), 0) AS ab,
+                    COALESCE(SUM(h), 0) AS h,
+                    COALESCE(SUM(bb), 0) AS bb,
+                    COALESCE(SUM(hbp), 0) AS hbp,
+                    COALESCE(SUM(sf), 0) AS sf,
+                    COALESCE(SUM(rbi), 0) AS rbi,
+                    COALESCE(SUM(sb), 0) AS sb,
+                    COALESCE(SUM(hr), 0) AS hr,
+                    COALESCE(SUM(tb), 0) AS tb,
+                    COALESCE(SUM(w), 0) AS w,
+                    COALESCE(SUM(ip), 0.0) AS ip,
+                    COALESCE(SUM(er), 0) AS er,
+                    COALESCE(SUM(k), 0) AS k,
+                    COALESCE(SUM(hld), 0) AS hld,
+                    COALESCE(SUM(sv), 0) AS sv,
+                    COALESCE(SUM(pitch_h), 0) AS pitch_h,
+                    COALESCE(SUM(pitch_bb), 0) AS pitch_bb,
+                    COALESCE(SUM(pitch_hbp), 0) AS pitch_hbp
+                FROM player_daily_stats
+                WHERE stat_date = ? AND player_id IN ({pid_placeholders})
+            """, [d_str] + scoring_pids)
+            fetched = cursor.fetchone()
+            if fetched:
+                for k in agg:
+                    agg[k] = (agg[k] or 0) + (fetched[k] or 0)
+
+        pen_ab, pen_er = _calc_empty_slot_penalties(lineup_map)
+        agg["ab"] = (agg["ab"] or 0) + pen_ab
+        agg["er"] = (agg["er"] or 0) + pen_er
 
     conn.close()
     return compute_derived_metrics(agg)
@@ -1254,6 +1382,12 @@ def api_lineup_move(request: Request, payload: LineupMovePayload):
     if not logged_team:
         return JSONResponse({"ok": False, "error": "尚未登入"}, status_code=401)
 
+    target_date = (payload.target_date or date.today().isoformat()).strip()
+    try:
+        date.fromisoformat(target_date)
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "無效的排賽日期格式（需為 YYYY-MM-DD）"}, status_code=400)
+
     new_roster = payload.roster_slot.upper()
     new_lineup = normalize_lineup_slot(payload.lineup_slot)
     if new_roster not in VALID_SLOTS:
@@ -1276,8 +1410,22 @@ def api_lineup_move(request: Request, payload: LineupMovePayload):
         if not row:
             return JSONResponse({"ok": False, "error": "找不到球員"}, status_code=404)
 
+        owner_team = (row["fantasy_team"] or "").strip()
+        eff_map = get_effective_lineup_map(cursor, logged_team, target_date)
+        cur_eff = eff_map.get(payload.player_id, {
+            "roster_slot": (row["roster_slot"] or "ACTIVE").upper().strip(),
+            "lineup_slot": normalize_lineup_slot(row["lineup_slot"]),
+        })
+
+        # 先發名單合法性驗證：非本隊名單內球員不得排入先發槽位
+        if new_roster == "ACTIVE" and new_lineup in SCORING_LINEUP_SLOTS and not payload.force_override:
+            if owner_team != logged_team or (row["roster_slot"] or "").upper().strip() == "RELEASED":
+                return JSONResponse({"ok": False, "error": "僅本隊名單內球員可排入先發槽位"}, status_code=400)
+            if cur_eff.get("roster_slot") != "ACTIVE":
+                return JSONResponse({"ok": False, "error": "僅出賽狀態（ACTIVE）球員可排入先發槽位"}, status_code=400)
+
         if not payload.force_override:
-            locked, lock_msg = is_game_locked_for_team(cursor, row["real_team"])
+            locked, lock_msg = is_game_locked_for_team(cursor, row["real_team"], target_date)
             if locked:
                 return JSONResponse({"ok": False, "error": lock_msg}, status_code=400)
 
@@ -1288,19 +1436,22 @@ def api_lineup_move(request: Request, payload: LineupMovePayload):
                     "error": f"球員處於 {LOCK_DAYS} 天名單鎖定中（剩餘 {lock_info['days_remaining']} 天）"
                 }, status_code=400)
 
-        occupant = None
+        occupant_id = None
         if new_roster == "ACTIVE" and new_lineup in SCORING_LINEUP_SLOTS:
+            for pid, info in eff_map.items():
+                if pid != payload.player_id and info.get("roster_slot") == "ACTIVE" and normalize_lineup_slot(info.get("lineup_slot")) == new_lineup:
+                    occupant_id = pid
+                    break
+
+        occupant = None
+        if occupant_id:
             cursor.execute("""
                 SELECT p.player_id, p.name, p.real_team, p.position, p.positions,
                        r.roster_slot, r.lineup_slot, r.slot_changed_at
                 FROM players p
                 JOIN team_rosters r ON p.player_id = r.player_id
-                WHERE r.fantasy_team = ?
-                  AND r.roster_slot = 'ACTIVE'
-                  AND UPPER(COALESCE(r.lineup_slot, '')) = ?
-                  AND p.player_id != ?
-                LIMIT 1
-            """, (logged_team, new_lineup, payload.player_id))
+                WHERE p.player_id = ?
+            """, (occupant_id,))
             occupant = cursor.fetchone()
 
         if new_roster == "ACTIVE" and not payload.force_override:
@@ -1309,13 +1460,15 @@ def api_lineup_move(request: Request, payload: LineupMovePayload):
             if not ok_pos:
                 return JSONResponse({"ok": False, "error": pos_msg}, status_code=400)
 
+        old_lineup = normalize_lineup_slot(cur_eff.get("lineup_slot") or row["lineup_slot"])
+        now_iso = datetime.now().isoformat(timespec="seconds")
+
         if occupant:
             if not payload.force_override:
-                occ_locked, occ_lock_msg = is_game_locked_for_team(cursor, occupant["real_team"])
+                occ_locked, occ_lock_msg = is_game_locked_for_team(cursor, occupant["real_team"], target_date)
                 if occ_locked:
                     return JSONResponse({"ok": False, "error": f"目標守位球員：{occ_lock_msg}"}, status_code=400)
 
-                old_lineup = normalize_lineup_slot(row["lineup_slot"])
                 occ_pos_set = parse_player_positions(occupant["positions"], occupant["position"])
                 if old_lineup in SCORING_LINEUP_SLOTS:
                     ok_occ_pos, occ_pos_msg = is_lineup_slot_eligible(old_lineup, occ_pos_set)
@@ -1327,51 +1480,57 @@ def api_lineup_move(request: Request, payload: LineupMovePayload):
                 )
                 if not ok_lim:
                     return JSONResponse({"ok": False, "error": lim_msg}, status_code=400)
-            else:
-                old_lineup = normalize_lineup_slot(row["lineup_slot"])
-
-            now_iso = datetime.now().isoformat(timespec="seconds")
-            cursor.execute("""
-                UPDATE team_rosters
-                SET fantasy_team = ?, roster_slot = 'ACTIVE', lineup_slot = ?,
-                    slot_changed_at = ?, status_reason = ?
-                WHERE player_id = ?
-            """, (logged_team, new_lineup, now_iso, payload.reason or "", payload.player_id))
 
             occ_target_slot = old_lineup if old_lineup in SCORING_LINEUP_SLOTS else "BN"
-            cursor.execute("""
-                UPDATE team_rosters
-                SET lineup_slot = ?
-                WHERE player_id = ?
-            """, (occ_target_slot, occupant["player_id"]))
+            eff_map[payload.player_id] = {"roster_slot": "ACTIVE", "lineup_slot": new_lineup}
+            eff_map[occupant["player_id"]] = {"roster_slot": "ACTIVE", "lineup_slot": occ_target_slot}
+            save_daily_lineup_snapshot(cursor, logged_team, target_date, eff_map)
+
+            if target_date >= date.today().isoformat():
+                cursor.execute("""
+                    UPDATE team_rosters
+                    SET fantasy_team = ?, roster_slot = 'ACTIVE', lineup_slot = ?,
+                        slot_changed_at = ?, status_reason = ?
+                    WHERE player_id = ?
+                """, (logged_team, new_lineup, now_iso, payload.reason or "", payload.player_id))
+                cursor.execute("""
+                    UPDATE team_rosters
+                    SET lineup_slot = ?
+                    WHERE player_id = ?
+                """, (occ_target_slot, occupant["player_id"]))
 
             conn.commit()
-            return JSONResponse({"ok": True, "swapped_with": occupant["name"]})
+            return JSONResponse({"ok": True, "swapped_with": occupant["name"], "target_date": target_date})
 
         if not payload.force_override:
             ok_lim, lim_msg = validate_roster_limits(cursor, logged_team, payload.player_id, new_roster, new_lineup)
             if not ok_lim:
                 return JSONResponse({"ok": False, "error": lim_msg}, status_code=400)
 
-        now_iso = datetime.now().isoformat(timespec="seconds")
         if new_roster == "RELEASED":
-            cursor.execute("""
-                UPDATE team_rosters
-                SET fantasy_team = '', roster_slot = 'RELEASED', lineup_slot = 'BN',
-                    slot_changed_at = ?, status_reason = '釋出至自由球員'
-                WHERE player_id = ?
-            """, (now_iso, payload.player_id))
+            eff_map.pop(payload.player_id, None)
+            save_daily_lineup_snapshot(cursor, logged_team, target_date, eff_map)
+            if target_date >= date.today().isoformat():
+                cursor.execute("""
+                    UPDATE team_rosters
+                    SET fantasy_team = '', roster_slot = 'RELEASED', lineup_slot = 'BN',
+                        slot_changed_at = ?, status_reason = '釋出至自由球員'
+                    WHERE player_id = ?
+                """, (now_iso, payload.player_id))
         else:
             final_lineup = new_lineup if new_roster == "ACTIVE" else "BN"
-            cursor.execute("""
-                UPDATE team_rosters
-                SET fantasy_team = ?, roster_slot = ?, lineup_slot = ?,
-                    slot_changed_at = ?, status_reason = ?
-                WHERE player_id = ?
-            """, (logged_team, new_roster, final_lineup, now_iso, payload.reason or "", payload.player_id))
+            eff_map[payload.player_id] = {"roster_slot": new_roster, "lineup_slot": final_lineup}
+            save_daily_lineup_snapshot(cursor, logged_team, target_date, eff_map)
+            if target_date >= date.today().isoformat():
+                cursor.execute("""
+                    UPDATE team_rosters
+                    SET fantasy_team = ?, roster_slot = ?, lineup_slot = ?,
+                        slot_changed_at = ?, status_reason = ?
+                    WHERE player_id = ?
+                """, (logged_team, new_roster, final_lineup, now_iso, payload.reason or "", payload.player_id))
 
         conn.commit()
-        return JSONResponse({"ok": True})
+        return JSONResponse({"ok": True, "target_date": target_date})
     finally:
         conn.close()
 
