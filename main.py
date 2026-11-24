@@ -278,12 +278,22 @@ def ensure_roster_columns(cursor):
         cursor.execute("ALTER TABLE team_rosters ADD COLUMN fantasy_team TEXT DEFAULT ''")
 
     now_iso = datetime.now().isoformat(timespec="seconds")
-    cursor.execute("""
-        UPDATE team_rosters
-        SET slot_changed_at = ?
-        WHERE slot_changed_at IS NULL OR slot_changed_at = ''
-    """, (now_iso,))
-
+    cursor.execute("SELECT 1 FROM team_rosters WHERE slot_changed_at IS NULL OR slot_changed_at = '' LIMIT 1")
+    if cursor.fetchone() is not None:
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        for _u_try in range(6):
+            try:
+                cursor.execute("""
+                    UPDATE team_rosters
+                    SET slot_changed_at = ?
+                    WHERE slot_changed_at IS NULL OR slot_changed_at = ''
+                """, (now_iso,))
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower() and _u_try < 5:
+                    time.sleep(0.2 * (_u_try + 1))
+                    continue
+                raise
 
 def ensure_stats_columns(cursor):
     cursor.execute("""
@@ -376,12 +386,52 @@ def ensure_extended_schema(cursor):
     if "last_fetched_at" not in g_cols:
         cursor.execute("ALTER TABLE cpbl_games ADD COLUMN last_fetched_at TEXT DEFAULT ''")
 
+    cursor.execute("SELECT 1 FROM team_rosters WHERE roster_slot = 'ACTIVE' AND (lineup_slot IS NULL OR lineup_slot = '' OR UPPER(lineup_slot) = 'BENCH') LIMIT 1")
+    if cursor.fetchone() is not None:
+        for _u_try in range(6):
+            try:
+                cursor.execute("""
+                    UPDATE team_rosters
+                    SET lineup_slot = 'BN'
+                    WHERE roster_slot = 'ACTIVE' AND (lineup_slot IS NULL OR lineup_slot = '' OR UPPER(lineup_slot) = 'BENCH')
+                """)
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower() and _u_try < 5:
+                    time.sleep(0.2 * (_u_try + 1))
+                    continue
+                raise
+
     cursor.execute("""
-        UPDATE team_rosters
-        SET lineup_slot = 'BN'
-        WHERE roster_slot = 'ACTIVE' AND (lineup_slot IS NULL OR lineup_slot = '' OR UPPER(lineup_slot) = 'BENCH')
+        CREATE TABLE IF NOT EXISTS weekly_matchup_results (
+            week_key TEXT PRIMARY KEY,
+            week_label TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            team_a TEXT NOT NULL,
+            team_b TEXT NOT NULL,
+            team_a_cat_w INTEGER NOT NULL DEFAULT 0,
+            team_a_cat_l INTEGER NOT NULL DEFAULT 0,
+            team_a_cat_t INTEGER NOT NULL DEFAULT 0,
+            team_a_series_w INTEGER NOT NULL DEFAULT 0,
+            team_a_series_l INTEGER NOT NULL DEFAULT 0,
+            team_a_series_t INTEGER NOT NULL DEFAULT 0,
+            team_b_series_w INTEGER NOT NULL DEFAULT 0,
+            team_b_series_l INTEGER NOT NULL DEFAULT 0,
+            team_b_series_t INTEGER NOT NULL DEFAULT 0,
+            details_json TEXT NOT NULL DEFAULT '[]',
+            settled_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
     """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS standing_popup_seen (
+            fantasy_team TEXT NOT NULL,
+            week_key TEXT NOT NULL,
+            seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (fantasy_team, week_key)
+        )
+    """)
 
 def clear_free_agent_players():
     conn = get_db()
@@ -1131,6 +1181,272 @@ def read_home(request: Request):
     )
 
 
+import json
+
+STANDINGS_TEST_TEAMS = ["台灣山林", "台灣海洋"]
+TWELVE_CAT_DEFS = [
+    ("r", "得分 (R)"),
+    ("avg", "打擊率 (AVG)"),
+    ("rbi", "打點 (RBI)"),
+    ("sb", "盜壘 (SB)"),
+    ("hr", "全壘打 (HR)"),
+    ("ops", "OPS"),
+    ("w", "勝投 (W)"),
+    ("era", "防禦率 (ERA)"),
+    ("k", "三振 (K)"),
+    ("hld", "中繼成功 (HLD)"),
+    ("sv", "救援成功 (SV)"),
+    ("whip", "WHIP"),
+]
+
+
+def _compare_12_cats_pair(team_a: str, team_b: str, week_key: str) -> dict:
+    a_stats = calc_team_12_cats(team_a, date_filter="ALL", week_key=week_key)
+    b_stats = calc_team_12_cats(team_b, date_filter="ALL", week_key=week_key)
+    a_w = a_l = a_t = 0
+    details = []
+
+    for key, label in TWELVE_CAT_DEFS:
+        ma = a_stats[key]
+        mb = b_stats[key]
+        diff = ma["val"] - mb["val"]
+        if abs(diff) < 1e-9:
+            res_a = "tie"
+            a_t += 1
+        elif ma["lower_better"]:
+            if ma["val"] < mb["val"]:
+                res_a = "win"
+                a_w += 1
+            else:
+                res_a = "loss"
+                a_l += 1
+        else:
+            if ma["val"] > mb["val"]:
+                res_a = "win"
+                a_w += 1
+            else:
+                res_a = "loss"
+                a_l += 1
+
+        details.append({
+            "key": key,
+            "name": label,
+            "team_a_val": ma["disp"],
+            "team_b_val": mb["disp"],
+            "result_a": res_a,
+        })
+
+    if a_w > a_l:
+        a_sw, a_sl, a_st = 1, 0, 0
+        b_sw, b_sl, b_st = 0, 1, 0
+    elif a_l > a_w:
+        a_sw, a_sl, a_st = 0, 1, 0
+        b_sw, b_sl, b_st = 1, 0, 0
+    else:
+        a_sw, a_sl, a_st = 0, 0, 1
+        b_sw, b_sl, b_st = 0, 0, 1
+
+    return {
+        "team_a": team_a,
+        "team_b": team_b,
+        "a_cat_w": a_w,
+        "a_cat_l": a_l,
+        "a_cat_t": a_t,
+        "a_sw": a_sw,
+        "a_sl": a_sl,
+        "a_st": a_st,
+        "b_sw": b_sw,
+        "b_sl": b_sl,
+        "b_st": b_st,
+        "details": details,
+    }
+
+
+def settle_finished_weeks(cursor, today_str: str | None = None, force_week_key: str | None = None) -> list[dict]:
+    d_now = (today_str or date.today().isoformat()).strip()
+    team_a, team_b = STANDINGS_TEST_TEAMS[0], STANDINGS_TEST_TEAMS[1]
+    newly_settled = []
+
+    for w in SCHEDULE_WEEKS:
+        w_key = w["key"]
+        is_finished = (d_now > w["end_date"]) or (force_week_key == w_key)
+        if not is_finished:
+            continue
+
+        cursor.execute("SELECT 1 FROM weekly_matchup_results WHERE week_key = ?", (w_key,))
+        if cursor.fetchone() and force_week_key != w_key:
+            continue
+
+        cmp = _compare_12_cats_pair(team_a, team_b, w_key)
+        for _attempt in range(5):
+            try:
+                cursor.execute("""
+                    INSERT INTO weekly_matchup_results (
+                        week_key, week_label, start_date, end_date,
+                        team_a, team_b,
+                        team_a_cat_w, team_a_cat_l, team_a_cat_t,
+                        team_a_series_w, team_a_series_l, team_a_series_t,
+                        team_b_series_w, team_b_series_l, team_b_series_t,
+                        details_json, settled_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(week_key) DO UPDATE SET
+                        team_a_cat_w = excluded.team_a_cat_w,
+                        team_a_cat_l = excluded.team_a_cat_l,
+                        team_a_cat_t = excluded.team_a_cat_t,
+                        team_a_series_w = excluded.team_a_series_w,
+                        team_a_series_l = excluded.team_a_series_l,
+                        team_a_series_t = excluded.team_a_series_t,
+                        team_b_series_w = excluded.team_b_series_w,
+                        team_b_series_l = excluded.team_b_series_l,
+                        team_b_series_t = excluded.team_b_series_t,
+                        details_json = excluded.details_json,
+                        settled_at = CURRENT_TIMESTAMP
+                """, (
+                    w_key, w["label"], w["start_date"], w["end_date"],
+                    team_a, team_b,
+                    cmp["a_cat_w"], cmp["a_cat_l"], cmp["a_cat_t"],
+                    cmp["a_sw"], cmp["a_sl"], cmp["a_st"],
+                    cmp["b_sw"], cmp["b_sl"], cmp["b_st"],
+                    json.dumps(cmp["details"], ensure_ascii=False),
+                ))
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower() and _attempt < 4:
+                    time.sleep(0.15 * (_attempt + 1))
+                    continue
+                raise
+        newly_settled.append({"week_key": w_key, "week_label": w["label"], **cmp})
+
+    return newly_settled
+
+
+def build_standings_board(cursor, today_str: str | None = None) -> tuple[list[dict], list[dict]]:
+    d_now = (today_str or date.today().isoformat()).strip()
+    settle_finished_weeks(cursor, d_now)
+
+    cursor.execute("SELECT * FROM weekly_matchup_results ORDER BY start_date ASC")
+    rows = [dict(r) for r in cursor.fetchall()]
+
+    remaining_weeks = sum(1 for w in SCHEDULE_WEEKS if d_now <= w["end_date"])
+    records = {
+        t: {"team": t, "w": 0, "l": 0, "t": 0}
+        for t in STANDINGS_TEST_TEAMS
+    }
+
+    week_history = []
+    for r in rows:
+        ta, tb = r["team_a"], r["team_b"]
+        if ta in records:
+            records[ta]["w"] += r["team_a_series_w"]
+            records[ta]["l"] += r["team_a_series_l"]
+            records[ta]["t"] += r["team_a_series_t"]
+        if tb in records:
+            records[tb]["w"] += r["team_b_series_w"]
+            records[tb]["l"] += r["team_b_series_l"]
+            records[tb]["t"] += r["team_b_series_t"]
+
+        try:
+            details = json.loads(r.get("details_json") or "[]")
+        except Exception:
+            details = []
+
+        week_history.append({
+            "week_key": r["week_key"],
+            "week_label": r["week_label"],
+            "team_a": ta,
+            "team_b": tb,
+            "team_a_cat_w": r["team_a_cat_w"],
+            "team_a_cat_l": r["team_a_cat_l"],
+            "team_a_cat_t": r["team_a_cat_t"],
+            "team_a_sw": r["team_a_series_w"],
+            "team_a_sl": r["team_a_series_l"],
+            "team_a_st": r["team_a_series_t"],
+            "team_b_sw": r["team_b_series_w"],
+            "team_b_sl": r["team_b_series_l"],
+            "b_st": r["team_b_series_t"],
+            "details": details,
+        })
+
+    board_list = []
+    for t in STANDINGS_TEST_TEAMS:
+        rec = records[t]
+        gp = rec["w"] + rec["l"] + rec["t"]
+        win_pct = ((rec["w"] + 0.5 * rec["t"]) / gp) if gp > 0 else 0.0
+        board_list.append({
+            "team": t,
+            "w": rec["w"],
+            "l": rec["l"],
+            "t": rec["t"],
+            "win_pct_val": win_pct,
+            "win_pct_disp": f"{win_pct:.3f}",
+        })
+
+    board_list.sort(key=lambda x: (-x["win_pct_val"], -x["w"], x["l"]))
+    leader = board_list[0] if board_list else None
+
+    for item in board_list:
+        if not leader or item["team"] == leader["team"]:
+            item["gb_disp"] = "0.0"
+        else:
+            gb = ((leader["w"] - item["w"]) + (item["l"] - leader["l"])) / 2.0
+            item["gb_disp"] = f"{max(0.0, gb):.1f}"
+
+        if not leader or item["team"] == leader["team"]:
+            item["elim_disp"] = "-"
+        else:
+            max_opp_wins = leader["w"] + remaining_weeks
+            max_self_wins = item["w"] + remaining_weeks
+            if max_self_wins < leader["w"]:
+                item["elim_disp"] = "淘汰"
+            else:
+                e_num = (max_opp_wins - item["w"]) - remaining_weeks + 1
+                item["elim_disp"] = str(max(0, e_num))
+
+    return board_list, week_history
+
+
+def get_pending_roster_popup(cursor, team: str, today_str: str | None = None) -> dict | None:
+    if team not in STANDINGS_TEST_TEAMS:
+        return None
+    d_now = (today_str or date.today().isoformat()).strip()
+    settle_finished_weeks(cursor, d_now)
+
+    cursor.execute("SELECT * FROM weekly_matchup_results WHERE end_date < ? ORDER BY end_date DESC", (d_now,))
+    finished_rows = [dict(r) for r in cursor.fetchall()]
+    for r in finished_rows:
+        w_key = r["week_key"]
+        cursor.execute(
+            "SELECT 1 FROM standing_popup_seen WHERE fantasy_team = ? AND week_key = ?",
+            (team, w_key),
+        )
+        if cursor.fetchone() is None:
+            try:
+                details = json.loads(r.get("details_json") or "[]")
+            except Exception:
+                details = []
+            if team == r["team_a"]:
+                my_sw, my_sl, my_st = r["team_a_series_w"], r["team_a_series_l"], r["team_a_series_t"]
+                opp_team = r["team_b"]
+            else:
+                my_sw, my_sl, my_st = r["team_b_series_w"], r["team_b_series_l"], r["team_b_series_t"]
+                opp_team = r["team_a"]
+            outcome_text = "勝" if my_sw > 0 else ("和" if my_st > 0 else "敗")
+            return {
+                "week_key": w_key,
+                "week_label": r["week_label"],
+                "team": team,
+                "opponent_team": opp_team,
+                "outcome_text": outcome_text,
+                "team_a": r["team_a"],
+                "team_b": r["team_b"],
+                "team_a_cat_w": r["team_a_cat_w"],
+                "team_a_cat_l": r["team_a_cat_l"],
+                "team_a_cat_t": r["team_a_cat_t"],
+                "details": details,
+            }
+    return None
+
+
 @app.get("/roster")
 def read_roster(request: Request, team: str = "樂天桃猿"):
     if team not in ALL_AVAILABLE_TEAMS:
@@ -1156,7 +1472,14 @@ def read_roster(request: Request, team: str = "樂天桃猿"):
             WHERE r.fantasy_team = ? AND r.roster_slot = 'MINORS'
         """, (team,))
         minors_players = [(row["player_id"], row["name"], row["position"]) for row in cursor.fetchall()]
+        settlement_popup = get_pending_roster_popup(cursor, team)
+        cursor.execute("SELECT week_key, week_label FROM weekly_matchup_results ORDER BY end_date DESC LIMIT 1")
+        lf = cursor.fetchone()
+        latest_finished_week = dict(lf) if lf else None
+        conn.commit()
     except sqlite3.Error:
+        settlement_popup = None
+        latest_finished_week = None
         active_players = []
         minors_players = []
     finally:
@@ -1175,6 +1498,8 @@ def read_roster(request: Request, team: str = "樂天桃猿"):
             "lineup_slots_ordered": LINEUP_SLOTS_ORDERED,
             "batter_slots": LINEUP_SLOTS_BATTER,
             "pitcher_slots": LINEUP_SLOTS_PITCHER,
+            "settlement_popup": settlement_popup,
+            "latest_finished_week": latest_finished_week,
         }
     )
 
@@ -1417,12 +1742,24 @@ def api_lineup_move(request: Request, payload: LineupMovePayload):
             "lineup_slot": normalize_lineup_slot(row["lineup_slot"]),
         })
 
-        # 先發名單合法性驗證：非本隊名單內球員不得排入先發槽位
+        # 先發名單合法性驗證：非本隊名單內、非 ACTIVE 或非冬盟出賽球員不得排入先發槽位
         if new_roster == "ACTIVE" and new_lineup in SCORING_LINEUP_SLOTS and not payload.force_override:
             if owner_team != logged_team or (row["roster_slot"] or "").upper().strip() == "RELEASED":
                 return JSONResponse({"ok": False, "error": "僅本隊名單內球員可排入先發槽位"}, status_code=400)
             if cur_eff.get("roster_slot") != "ACTIVE":
                 return JSONResponse({"ok": False, "error": "僅出賽狀態（ACTIVE）球員可排入先發槽位"}, status_code=400)
+
+            pid_str = (row["player_id"] or "").strip()
+            cursor.execute(
+                "SELECT 1 FROM player_game_stats WHERE player_id = ? AND game_key LIKE '2026_P_%' LIMIT 1",
+                (pid_str,),
+            )
+            has_awb_game = cursor.fetchone() is not None
+            if not pid_str.startswith("AWB_") and not has_awb_game:
+                return JSONResponse(
+                    {"ok": False, "error": f"球員【{row['name']}】非冬盟名單／出賽球員，不得排入先發槽位"},
+                    status_code=400,
+                )
 
         if not payload.force_override:
             locked, lock_msg = is_game_locked_for_team(cursor, row["real_team"], target_date)
@@ -1914,3 +2251,71 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
+
+@app.get("/standings")
+def read_standings(request: Request, team: str = "台灣山林", sim_date: str | None = None):
+    selected_team = team if team in STANDINGS_TEST_TEAMS else "台灣山林"
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        ensure_extended_schema(cursor)
+        if sim_date:
+            settle_finished_weeks(cursor, sim_date)
+        board, week_history = build_standings_board(cursor, sim_date)
+        conn.commit()
+    finally:
+        conn.close()
+
+    return templates.TemplateResponse(
+        request=request,
+        name="standings.html",
+        context={
+            "active_page": "standings",
+            "enable_admin": ENABLE_ADMIN,
+            "teams": STANDINGS_TEST_TEAMS,
+            "current_team": selected_team,
+            "standings_board": board,
+            "week_history": week_history,
+            "schedule_weeks": SCHEDULE_WEEKS,
+            "sim_date": sim_date or "",
+        },
+    )
+
+
+@app.post("/api/standings/dismiss-popup")
+async def api_dismiss_standing_popup(request: Request):
+    data = await request.json()
+    team = (data.get("team") or "").strip()
+    week_key = (data.get("week_key") or "").strip()
+    if team not in STANDINGS_TEST_TEAMS or not week_key:
+        return JSONResponse({"ok": False, "error": "參數無效"}, status_code=400)
+
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        ensure_extended_schema(cursor)
+        cursor.execute("""
+            INSERT OR IGNORE INTO standing_popup_seen (fantasy_team, week_key, seen_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+        """, (team, week_key))
+        conn.commit()
+        return JSONResponse({"ok": True})
+    finally:
+        conn.close()
+
+
+@app.post("/api/standings/settle")
+async def api_settle_standings(request: Request):
+    data = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    sim_date = (data.get("sim_date") or "").strip() or None
+    force_week_key = (data.get("week_key") or "").strip() or None
+
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        ensure_extended_schema(cursor)
+        settled = settle_finished_weeks(cursor, sim_date, force_week_key=force_week_key)
+        conn.commit()
+        return JSONResponse({"ok": True, "settled": settled})
+    finally:
+        conn.close()

@@ -20,6 +20,9 @@
         <a href="/matchup" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium">
           對戰與調度中心
         </a>
+        <a href="/standings?team={{ current_team }}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium">
+          戰績排行
+        </a>
       </div>
       <div class="text-slate-400">
         檢視隊伍：<span class="text-slate-100 font-semibold">{{ current_team }}</span>
@@ -109,5 +112,78 @@
     </div>
 
   </div>
+
+  {% if settlement_popup %}
+  <div id="settlementModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
+    <div class="bg-slate-900 border border-slate-700 rounded-2xl max-w-2xl w-full p-5 space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div>
+          <div class="text-xs text-emerald-400 font-semibold">本週比賽已結束 · 戰績已更新</div>
+          <h2 class="text-lg font-bold text-slate-100 mt-0.5">
+            {{ settlement_popup.week_label }} 結算（{{ settlement_popup.team }}：{{ settlement_popup.outcome_text }}）
+          </h2>
+        </div>
+        <button onclick="dismissSettlement('{{ settlement_popup.team }}', '{{ settlement_popup.week_key }}')"
+                class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300">
+          關閉
+        </button>
+      </div>
+      <div class="text-xs text-slate-300">
+        {{ settlement_popup.team_a }} vs {{ settlement_popup.team_b }} 類別戰績：
+        <span class="font-mono text-slate-100">{{ settlement_popup.team_a_cat_w }}W - {{ settlement_popup.team_a_cat_l }}L - {{ settlement_popup.team_a_cat_t }}T</span>
+      </div>
+      <div class="max-h-64 overflow-y-auto border border-slate-800 rounded-xl">
+        <table class="w-full text-xs text-left">
+          <thead>
+            <tr class="border-b border-slate-800 text-slate-400 bg-slate-950/60">
+              <th class="py-2 px-3">類別</th>
+              <th class="py-2 px-3">{{ settlement_popup.team_a }}</th>
+              <th class="py-2 px-3">{{ settlement_popup.team_b }}</th>
+              <th class="py-2 px-3">{{ settlement_popup.team_a }} 結果</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-800/70">
+            {% for d in settlement_popup.details %}
+            <tr>
+              <td class="py-1.5 px-3 text-slate-200">{{ d.name }}</td>
+              <td class="py-1.5 px-3 font-mono">{{ d.team_a_val }}</td>
+              <td class="py-1.5 px-3 font-mono">{{ d.team_b_val }}</td>
+              <td class="py-1.5 px-3 font-mono">
+                {% if d.result_a == 'win' %}<span class="text-emerald-400">勝</span>
+                {% elif d.result_a == 'loss' %}<span class="text-rose-400">敗</span>
+                {% else %}<span class="text-amber-300">和</span>{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="flex items-center justify-end gap-2 pt-2">
+        <a href="/standings?team={{ settlement_popup.team }}"
+           onclick="dismissSettlement('{{ settlement_popup.team }}', '{{ settlement_popup.week_key }}')"
+           class="px-4 py-2 rounded-lg bg-sky-700 hover:bg-sky-600 text-white text-xs font-medium">
+          前往戰績表查看
+        </a>
+        <button onclick="dismissSettlement('{{ settlement_popup.team }}', '{{ settlement_popup.week_key }}')"
+                class="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-medium">
+          我知道了，開始調度
+        </button>
+      </div>
+    </div>
+  </div>
+  <script>
+    async function dismissSettlement(team, weekKey) {
+      try {
+        await fetch("/api/standings/dismiss-popup", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ team, week_key: weekKey })
+        });
+      } catch (e) {}
+      const modal = document.getElementById("settlementModal");
+      if (modal) modal.remove();
+    }
+  </script>
+  {% endif %}
 </body>
 </html>

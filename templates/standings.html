@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <title>戰績排行 - {{ current_team }}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-200 min-h-screen p-4 md:p-6">
+  <div class="max-w-7xl mx-auto space-y-6">
+
+    <!-- 跨頁導覽列 -->
+    <nav class="flex flex-wrap items-center justify-between gap-3 bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-xs">
+      <div class="flex flex-wrap items-center gap-2">
+        <a href="/" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium">
+          首頁
+        </a>
+        <a href="/roster?team={{ current_team }}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium">
+          球員名單
+        </a>
+        <a href="/matchup" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium">
+          對戰與調度中心
+        </a>
+        <a href="/standings?team={{ current_team }}" class="px-3 py-1.5 rounded-lg bg-slate-700 text-white font-medium border border-slate-600">
+          戰績排行
+        </a>
+      </div>
+      <div class="text-slate-400">
+        測試對戰隊伍：<span class="text-slate-100 font-semibold">台灣山林 vs 台灣海洋</span>
+      </div>
+    </nav>
+
+    <!-- 標題與測試結算工具 -->
+    <div class="flex flex-wrap items-center justify-between gap-4 bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div>
+        <h1 class="text-xl font-bold text-slate-100">戰績排行表（測試：台灣山林 vs 台灣海洋）</h1>
+        <p class="text-xs text-slate-400 mt-0.5">每週 12 項類別比對結算後寫入戰績，並於進入調度畫面時彈出當週結果</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 text-xs">
+        <button onclick="settleWeek('2026-11-23_2026-11-29')" class="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-medium">
+          結算第1週（11/23～11/29）
+        </button>
+        <button onclick="settleWeek('2026-11-30_2026-12-04')" class="px-3 py-1.5 rounded-lg bg-sky-700 hover:bg-sky-600 text-white font-medium">
+          結算第2週（11/30～12/4）
+        </button>
+      </div>
+    </div>
+
+    <!-- 戰績表 -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 overflow-x-auto">
+      <h2 class="text-base font-semibold text-slate-100 mb-3">總戰績</h2>
+      <table class="w-full text-sm text-left">
+        <thead>
+          <tr class="border-b border-slate-800 text-slate-400 text-xs">
+            <th class="py-2.5 pr-4">隊名</th>
+            <th class="py-2.5 px-3">勝</th>
+            <th class="py-2.5 px-3">敗</th>
+            <th class="py-2.5 px-3">和</th>
+            <th class="py-2.5 px-3">勝率</th>
+            <th class="py-2.5 px-3">勝差</th>
+            <th class="py-2.5 pl-3">淘汰指數</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800/70">
+          {% for row in standings_board %}
+          <tr>
+            <td class="py-3 pr-4 font-semibold text-slate-100">{{ row.team }}</td>
+            <td class="py-3 px-3 font-mono text-emerald-400">{{ row.w }}</td>
+            <td class="py-3 px-3 font-mono text-rose-400">{{ row.l }}</td>
+            <td class="py-3 px-3 font-mono text-amber-300">{{ row.t }}</td>
+            <td class="py-3 px-3 font-mono text-slate-100">{{ row.win_pct_disp }}</td>
+            <td class="py-3 px-3 font-mono text-slate-300">{{ row.gb_disp }}</td>
+            <td class="py-3 pl-3 font-mono text-sky-300">{{ row.elim_disp }}</td>
+          </tr>
+          {% else %}
+          <tr>
+            <td colspan="7" class="py-4 text-xs text-slate-500">尚無已結算週次資料</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 各週對戰結算紀錄 -->
+    <div class="space-y-4">
+      <h2 class="text-base font-semibold text-slate-100">各週結算明細</h2>
+      {% for wh in week_history %}
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div class="font-semibold text-slate-100">{{ wh.week_label }}</div>
+          <div class="text-xs font-mono text-slate-300">
+            {{ wh.team_a }} 類別 {{ wh.team_a_cat_w }}W - {{ wh.team_a_cat_l }}L - {{ wh.team_a_cat_t }}T
+            ｜ 週勝負：{{ wh.team_a }} {{ wh.team_a_sw }}W-{{ wh.team_a_sl }}L-{{ wh.team_a_st }}T / {{ wh.team_b }} {{ wh.team_b_sw }}W-{{ wh.team_b_sl }}L-{{ wh.b_st }}T
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-xs text-left">
+            <thead>
+              <tr class="border-b border-slate-800 text-slate-400">
+                <th class="py-1.5 pr-3">類別</th>
+                <th class="py-1.5 px-3">{{ wh.team_a }}</th>
+                <th class="py-1.5 px-3">{{ wh.team_b }}</th>
+                <th class="py-1.5 pl-3">{{ wh.team_a }} 結果</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800/60">
+              {% for d in wh.details %}
+              <tr>
+                <td class="py-1.5 pr-3 text-slate-200">{{ d.name }}</td>
+                <td class="py-1.5 px-3 font-mono">{{ d.team_a_val }}</td>
+                <td class="py-1.5 px-3 font-mono">{{ d.team_b_val }}</td>
+                <td class="py-1.5 pl-3 font-mono">
+                  {% if d.result_a == 'win' %}<span class="text-emerald-400">勝</span>
+                  {% elif d.result_a == 'loss' %}<span class="text-rose-400">敗</span>
+                  {% else %}<span class="text-amber-300">和</span>{% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% else %}
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 text-xs text-slate-500">
+        目前尚無已結算的週次，可點選上方按鈕手動結算第 1 週或第 2 週進行測試。
+      </div>
+      {% endfor %}
+    </div>
+
+  </div>
+
+  <script>
+    async function settleWeek(weekKey) {
+      const resp = await fetch("/api/standings/settle", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ week_key: weekKey })
+      });
+      const data = await resp.json();
+      if (data.ok) {
+        window.location.reload();
+      } else {
+        alert(data.error || "結算失敗");
+      }
+    }
+  </script>
+</body>
+</html>
