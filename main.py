@@ -539,8 +539,8 @@ def compute_derived_metrics(row: dict) -> dict:
     slg = (tb / ab) if ab > 0 else 0.0
     ops = obp + slg
 
-    era = ((er * 9) / ip) if ip > 0 else 0.0
-    whip = ((pitch_h + pitch_bb + pitch_hbp) / ip) if ip > 0 else 0.0
+    era = ((er * 9) / ip) if ip > 0 else (99.0 if er > 0 else 0.0)
+    whip = ((pitch_h + pitch_bb + pitch_hbp) / ip) if ip > 0 else (99.0 if (pitch_h + pitch_bb + pitch_hbp) > 0 else 0.0)
 
     return {
         "r": {"val": row.get("r", 0) or 0, "disp": str(row.get("r", 0) or 0), "lower_better": False},
