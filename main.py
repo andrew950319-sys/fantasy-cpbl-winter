@@ -3059,6 +3059,20 @@ async def page_draft(request: Request):
         pass
     return templates.TemplateResponse("draft.html", ctx)
 
+
+@app.get("/draft/admin")
+async def page_draft_admin(request: Request):
+    import inspect
+    ctx = {"request": request}
+    try:
+        sig = inspect.signature(templates.TemplateResponse)
+        params = list(sig.parameters.keys())
+        if params and params[0] == "request":
+            return templates.TemplateResponse(request, "draft_admin.html", {})
+    except Exception:
+        pass
+    return templates.TemplateResponse("draft_admin.html", ctx)
+
 # === DRAFT SYSTEM END ===
 def _draft_init_after_main():
     conn = get_db()
