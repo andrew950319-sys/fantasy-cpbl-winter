@@ -32,16 +32,16 @@
     <a href="/roster">名單</a>
     <a href="/standings">戰績</a>
     <a href="/matchup">調度</a>
-    <a href="/draft" class="active">選秀</a>
+    <a href="/draft/admin" class="active">選秀</a>
   </nav>
 
   <div class="container">
-    <!-- 加入選秀房 -->
+    <!-- 僅保留加入選秀房 -->
     <div class="card">
       <div class="row" style="justify-content: space-between;">
         <div>
           <strong>加入選秀房間</strong>
-          <span class="muted">—— 選擇房間、挑選你的隊伍並輸入密碼即可進入選秀。</span>
+          <span class="muted">—— 選擇房間、挑選你的隊伍並輸入密碼即可進入房間等待開始。</span>
         </div>
         <span id="authStatusBadge" class="badge">尚未加入隊伍</span>
       </div>
@@ -59,10 +59,11 @@
         <button type="button" class="secondary" onclick="clearRoomAccess()">更換隊伍</button>
         <span id="authMsg" class="msg"></span>
       </div>
+      <div id="lobbyHint" class="muted" style="margin-top:10px;"></div>
     </div>
 
-    <!-- 選秀進行區 -->
-    <div class="grid-3">
+    <!-- 僅在選秀正式開始後才顯示 -->
+    <div id="draftActiveGrid" class="grid-3" style="display:none;">
       <div class="card">
         <div class="row" style="justify-content:space-between;">
           <strong id="roomHeading">尚未選擇房間</strong>
@@ -194,6 +195,31 @@ async function pollState() {
 
 function renderState(data) {
   const { room, teams, turn_team, remaining_seconds, current_player, picks } = data;
+  const status = String((room && room.status) || '').toUpperCase();
+  // 僅在正式進行選秀時顯示選秀操作區、球員池與各隊戰況/紀錄
+  const isLiveDraft = ['ACTIVE', 'RUNNING', 'IN_PROGRESS', 'PAUSED'].includes(status);
+  const activeGrid = document.getElementById('draftActiveGrid');
+  if (activeGrid) {
+    activeGrid.style.display = isLiveDraft ? '' : 'none';
+  }
+
+  const prevJoin = joinTeamSelect.value;
+  joinTeamSelect.innerHTML = (teams || []).map(t => `<option value="${t.fantasy_team}">${t.fantasy_team}</option>`).join('');
+  if (prevJoin && (teams || []).some(t => t.fantasy_team === prevJoin)) {
+    joinTeamSelect.value = prevJoin;
+  } else if (getActiveTeam() && (teams || []).some(t => t.fantasy_team === getActiveTeam())) {
+    joinTeamSelect.value = getActiveTeam();
+  }
+  updateAuthUI();
+
+  const joinedCount = (teams || []).filter(t => t.joined || t.is_joined).length;
+  const teamNames = (teams || []).map(t => t.fantasy_team).join('、') || '無';
+  lobbyHint.textContent = isLiveDraft
+    ? `房間狀態：${status}（選秀進行中）`
+    : `目前房間狀態：${status || '等待加入'}｜可加入隊伍：${teamNames}（尚未開始選秀，加入後等待開賽）`;
+
+  if (!isLiveDraft) return;
+
   roomHeading.textContent = `#${room.id} ${room.title}（${room.status}）`;
   roomModeBadge.textContent = `${room.mode}｜${room.target_slot}`;
   roundInfo.textContent = `第 ${room.current_round} 輪`;
@@ -202,15 +228,6 @@ function renderState(data) {
     ? `提名輪值：${room.current_nominator || '-'}`
     : `目前指名：${turn_team || '-'}`;
 
-  const prevJoin = joinTeamSelect.value;
-  joinTeamSelect.innerHTML = teams.map(t => `<option value="${t.fantasy_team}">${t.fantasy_team}</option>`).join('');
-  if (prevJoin && teams.some(t => t.fantasy_team === prevJoin)) {
-    joinTeamSelect.value = prevJoin;
-  } else if (getActiveTeam() && teams.some(t => t.fantasy_team === getActiveTeam())) {
-    joinTeamSelect.value = getActiveTeam();
-  }
-  updateAuthUI();
-
   auctionBox.style.display = room.mode === 'AUCTION' ? 'block' : 'none';
   if (room.mode === 'AUCTION') {
     curPlayerName.textContent = current_player ? `${current_player.name} (${current_player.pos || '-'})` : '尚未提名（輪到你提名時可在右側挑選球員）';
@@ -218,14 +235,14 @@ function renderState(data) {
     curHighTeam.textContent = room.current_high_team || '-';
   }
 
-  teamsBoard.innerHTML = teams.map(t =>
+  teamsBoard.innerHTML = (teams || []).map(t =>
     `<div class="pool-item">
       <div><strong>${t.fantasy_team}</strong> <span class="muted">(順位 #${t.draft_order})</span></div>
       <div class="muted">已選 ${t.drafted_count}/${room.picks_per_team}｜一軍 ${t.active_roster_count}/25｜總計 ${t.total_roster_count}/60${room.mode === 'AUCTION' ? `｜剩 $${t.remaining_budget} (上限 $${t.max_bid})` : ''}</div>
     </div>`
   ).join('');
 
-  picksLog.innerHTML = picks.map(p =>
+  picksLog.innerHTML = (picks || []).map(p =>
     `<div class="pool-item">
       <span>#${p.pick_no} <strong>${p.fantasy_team}</strong> → ${p.player_name}</span>
       <span class="muted">${p.price ? `$${p.price}` : (p.is_auto ? '隨機' : '指名')}</span>
@@ -238,7 +255,7 @@ function renderState(data) {
 function renderPool() {
   if (!latestState) return;
   const kw = (searchPlayer.value || '').trim().toLowerCase();
-  const list = latestState.available_players.filter(p =>
+  const list = (latestState.available_players || []).filter(p =>
     !kw || p.name.toLowerCase().includes(kw) || p.pos.toLowerCase().includes(kw) || p.team.toLowerCase().includes(kw)
   );
   const mode = latestState.room.mode;

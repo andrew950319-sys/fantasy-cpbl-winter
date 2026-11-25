@@ -1,0 +1,5 @@
+import subprocess
+
+res = subprocess.run(["git", "status", "--short"], capture_output=True, text=True)
+print("=== Git Status ===")
+print(res.stdout.strip() or "(無未提交變更)")

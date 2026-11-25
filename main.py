@@ -2808,7 +2808,7 @@ async def api_draft_create_room(payload: dict = Body(...)):
                 turn_seconds, bid_extend_seconds, pool_mode, custom_pool_json,
                 status, current_round, current_turn_idx, current_nominator,
                 deadline_ts, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 1, 0, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'LOBBY', 1, 0, ?, ?, ?)
         """, (
             title, room_password, mode, target_slot, picks_per_team, default_budget,
             turn_seconds, bid_extend_seconds, pool_mode, _draft_json.dumps(custom_ids, ensure_ascii=False),
@@ -3028,6 +3028,34 @@ async def api_draft_pick(room_id: int, payload: dict = Body(...)):
         conn.close()
 
 
+
+@app.post("/api/draft/rooms/{room_id}/start")
+async def api_draft_start_room(room_id: int):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        ensure_extended_schema(cursor)
+        ensure_draft_schema(cursor)
+        cursor.execute("SELECT * FROM draft_rooms WHERE id = ?", (room_id,))
+        row = cursor.fetchone()
+        if not row:
+            return JSONResponse({"ok": False, "error": "找不到選秀房"}, status_code=404)
+        room = dict(row)
+        now_ts = _draft_now_ts()
+        turn_sec = int(room.get("turn_seconds") or 30)
+        cursor.execute("""
+            UPDATE draft_rooms
+            SET status = 'ACTIVE',
+                current_round = COALESCE(NULLIF(current_round, 0), 1),
+                current_turn_idx = COALESCE(current_turn_idx, 0),
+                deadline_ts = ?
+            WHERE id = ?
+        """, (now_ts + turn_sec, room_id))
+        conn.commit()
+        return JSONResponse({"ok": True, "room_id": room_id, "status": "ACTIVE"})
+    finally:
+        conn.close()
+
 @app.post("/api/draft/rooms/{room_id}/finish")
 async def api_draft_finish(room_id: int):
     conn = get_db()
@@ -3058,6 +3086,10 @@ async def page_draft(request: Request):
     except Exception:
         pass
     return templates.TemplateResponse("draft.html", ctx)
+
+
+
+
 
 
 @app.get("/draft/admin")
