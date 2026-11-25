@@ -464,6 +464,7 @@ def init_stats_and_sample_data():
 init_stats_and_sample_data()
 
 
+
 def run_auto_fetch_due_games(force_all: bool = False, sync_schedule: bool = True) -> dict:
     with auto_fetch_lock:
         now_dt = datetime.now()
@@ -2319,3 +2320,753 @@ async def api_settle_standings(request: Request):
         return JSONResponse({"ok": True, "settled": settled})
     finally:
         conn.close()
+
+
+# === DRAFT SYSTEM START ===
+import json as _draft_json
+import random as _draft_random
+import time as _draft_time
+from datetime import datetime as _draft_dt, timezone as _draft_tz
+from fastapi import Body
+
+DRAFT_TOTAL_ROSTER_CAP = 60
+
+
+def _draft_now_ts() -> float:
+    return _draft_time.time()
+
+
+def _draft_now_iso() -> str:
+    return _draft_dt.now(_draft_tz.utc).isoformat()
+
+
+def ensure_draft_schema(cursor):
+
+    try:
+        cursor.execute("PRAGMA table_info(draft_rooms)")
+        dcols = {r[1] for r in cursor.fetchall()}
+        if "room_password" not in dcols:
+            cursor.execute("ALTER TABLE draft_rooms ADD COLUMN room_password TEXT NOT NULL DEFAULT ''")
+    except Exception:
+        pass
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS draft_rooms (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            room_password TEXT NOT NULL DEFAULT '',
+            mode TEXT NOT NULL DEFAULT 'AUCTION',
+            target_slot TEXT NOT NULL DEFAULT 'ACTIVE',
+            picks_per_team INTEGER NOT NULL DEFAULT 25,
+            budget_per_team INTEGER NOT NULL DEFAULT 260,
+            turn_seconds INTEGER NOT NULL DEFAULT 30,
+            bid_extend_seconds INTEGER NOT NULL DEFAULT 10,
+            pool_mode TEXT NOT NULL DEFAULT 'FA',
+            custom_pool_json TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
+            current_round INTEGER NOT NULL DEFAULT 1,
+            current_turn_idx INTEGER NOT NULL DEFAULT 0,
+            current_player_id TEXT DEFAULT '',
+            current_nominator TEXT DEFAULT '',
+            current_high_bid INTEGER NOT NULL DEFAULT 0,
+            current_high_team TEXT DEFAULT '',
+            deadline_ts REAL NOT NULL DEFAULT 0,
+            rosters_imported INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS draft_teams (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_id INTEGER NOT NULL,
+            fantasy_team TEXT NOT NULL,
+            draft_order INTEGER NOT NULL,
+            remaining_budget INTEGER NOT NULL DEFAULT 260,
+            drafted_count INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(room_id, fantasy_team)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS draft_picks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_id INTEGER NOT NULL,
+            pick_no INTEGER NOT NULL,
+            round_no INTEGER NOT NULL,
+            fantasy_team TEXT NOT NULL,
+            player_id TEXT NOT NULL,
+            target_slot TEXT NOT NULL DEFAULT 'ACTIVE',
+            price INTEGER NOT NULL DEFAULT 0,
+            is_auto INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS draft_bids (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_id INTEGER NOT NULL,
+            player_id TEXT NOT NULL,
+            fantasy_team TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+
+def _draft_get_roster_counts(cursor, fantasy_team: str) -> tuple[int, int]:
+    cursor.execute("""
+        SELECT roster_slot, COUNT(*) AS cnt
+        FROM team_rosters
+        WHERE fantasy_team = ?
+        GROUP BY roster_slot
+    """, (fantasy_team,))
+    active_cnt = 0
+    minors_cnt = 0
+    for row in cursor.fetchall():
+        slot = (row["roster_slot"] if hasattr(row, "__getitem__") else row[0]) or ""
+        cnt = int(row["cnt"] if hasattr(row, "__getitem__") else row[1])
+        if slot == "ACTIVE":
+            active_cnt += cnt
+        elif slot == "MINORS":
+            minors_cnt += cnt
+    return active_cnt, minors_cnt
+
+
+def _draft_can_add_to_slot(cursor, fantasy_team: str, target_slot: str, extra_picks_in_room: int = 0) -> tuple[bool, str]:
+    active_cnt, minors_cnt = _draft_get_roster_counts(cursor, fantasy_team)
+    total_after = active_cnt + minors_cnt + 1 + max(0, extra_picks_in_room)
+    if total_after > DRAFT_TOTAL_ROSTER_CAP:
+        return False, f"{fantasy_team} 一二軍合計已達上限 {DRAFT_TOTAL_ROSTER_CAP} 人"
+    if target_slot == "ACTIVE":
+        cap = globals().get("MAX_ACTIVE_ROSTER", 25)
+        if active_cnt + 1 > cap:
+            return False, f"{fantasy_team} 一軍已達上限 {cap} 人"
+    return True, ""
+
+
+def _draft_available_players(cursor, room: dict) -> list[dict]:
+    cursor.execute("SELECT player_id FROM draft_picks WHERE room_id = ?", (room["id"],))
+    picked_ids = {r[0] for r in cursor.fetchall()}
+
+    cursor.execute("SELECT player_id FROM team_rosters WHERE COALESCE(fantasy_team, '') != ''")
+    rostered_ids = {r[0] for r in cursor.fetchall()}
+
+    pool_mode = room["pool_mode"] or "FA"
+    custom_ids = []
+    try:
+        raw_list = _draft_json.loads(room["custom_pool_json"] or "[]")
+        if isinstance(raw_list, list):
+            custom_ids = [str(x).strip() for x in raw_list if str(x).strip()]
+    except Exception:
+        custom_ids = []
+
+    cursor.execute("PRAGMA table_info(players)")
+    cols = {r[1] for r in cursor.fetchall()}
+    name_col = "name" if "name" in cols else ("player_name" if "player_name" in cols else "player_id")
+    pos_col = "pos" if "pos" in cols else ("position" if "position" in cols else "")
+    team_col = "team" if "team" in cols else ("mlb_team" if "mlb_team" in cols else "")
+
+    pos_expr = pos_col if pos_col else "''"
+    team_expr = team_col if team_col else "''"
+    cursor.execute(f"SELECT player_id, {name_col} AS pname, {pos_expr} AS ppos, {team_expr} AS pteam FROM players")
+
+    result = []
+    custom_set = set(custom_ids)
+    for r in cursor.fetchall():
+        pid = str(r[0])
+        if pid in picked_ids:
+            continue
+        if pool_mode == "FA" and pid in rostered_ids:
+            continue
+        if pool_mode == "CUSTOM" and pid not in custom_set:
+            continue
+        result.append({
+            "player_id": pid,
+            "name": str(r[1] or pid),
+            "pos": str(r[2] or ""),
+            "team": str(r[3] or ""),
+        })
+    if pool_mode == "CUSTOM" and custom_ids:
+        order_map = {pid: idx for idx, pid in enumerate(custom_ids)}
+        result.sort(key=lambda x: (order_map.get(x["player_id"], 999999), x["player_id"]))
+    else:
+        result.sort(key=lambda x: (x["pos"], x["name"], x["player_id"]))
+    return result
+
+
+def _draft_turn_team(teams: list[dict], mode: str, round_no: int, turn_idx: int) -> dict | None:
+    if not teams:
+        return None
+    n = len(teams)
+    idx = turn_idx % n
+    if mode == "SNAKE" and (round_no % 2 == 0):
+        idx = (n - 1) - idx
+    return teams[idx]
+
+
+def _draft_max_bid(team_row: dict, room: dict) -> int:
+    if room["mode"] != "AUCTION":
+        return 0
+    rem_budget = int(team_row["remaining_budget"])
+    rem_slots = max(1, int(room["picks_per_team"]) - int(team_row["drafted_count"]))
+    return max(0, rem_budget - (rem_slots - 1))
+
+
+def _draft_record_pick(cursor, room: dict, team_row: dict, player_id: str, price: int, is_auto: int):
+    cursor.execute("SELECT COALESCE(MAX(pick_no), 0) + 1 FROM draft_picks WHERE room_id = ?", (room["id"],))
+    next_pick_no = int(cursor.fetchone()[0])
+    cursor.execute("""
+        INSERT INTO draft_picks (room_id, pick_no, round_no, fantasy_team, player_id, target_slot, price, is_auto, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        room["id"], next_pick_no, room["current_round"], team_row["fantasy_team"],
+        player_id, room["target_slot"], int(price), int(is_auto), _draft_now_iso()
+    ))
+    new_drafted = int(team_row["drafted_count"]) + 1
+    new_budget = int(team_row["remaining_budget"]) - int(price)
+    cursor.execute("""
+        UPDATE draft_teams
+        SET drafted_count = ?, remaining_budget = ?
+        WHERE id = ?
+    """, (new_drafted, new_budget, team_row["id"]))
+
+
+def _draft_advance_turn(cursor, room: dict, teams: list[dict], now_ts: float):
+    all_done = all(int(t["drafted_count"]) >= int(room["picks_per_team"]) for t in teams)
+    avail = _draft_available_players(cursor, room)
+    if all_done or not avail:
+        cursor.execute("""
+            UPDATE draft_rooms
+            SET status = 'FINISHED', current_player_id = '', current_nominator = '',
+                current_high_bid = 0, current_high_team = '', deadline_ts = 0
+            WHERE id = ?
+        """, (room["id"],))
+        _draft_import_to_rosters(cursor, room["id"])
+        return
+
+    n = len(teams)
+    next_turn_idx = int(room["current_turn_idx"]) + 1
+    next_round = int(room["current_round"])
+    if next_turn_idx >= n:
+        next_turn_idx = 0
+        next_round += 1
+
+    checked = 0
+    while checked < n * 2:
+        cand = _draft_turn_team(teams, room["mode"], next_round, next_turn_idx)
+        if cand and int(cand["drafted_count"]) < int(room["picks_per_team"]):
+            break
+        next_turn_idx += 1
+        if next_turn_idx >= n:
+            next_turn_idx = 0
+            next_round += 1
+        checked += 1
+
+    turn_team = _draft_turn_team(teams, room["mode"], next_round, next_turn_idx)
+    nom_team = turn_team["fantasy_team"] if (room["mode"] == "AUCTION" and turn_team) else ""
+    deadline = now_ts + int(room["turn_seconds"])
+
+    cursor.execute("""
+        UPDATE draft_rooms
+        SET current_round = ?, current_turn_idx = ?, current_player_id = '',
+            current_nominator = ?, current_high_bid = 0, current_high_team = '',
+            deadline_ts = ?
+        WHERE id = ?
+    """, (next_round, next_turn_idx, nom_team, deadline, room["id"]))
+
+
+def _draft_process_tick(cursor, room_id: int):
+    cursor.execute("SELECT * FROM draft_rooms WHERE id = ?", (room_id,))
+    r_row = cursor.fetchone()
+    if not r_row:
+        return
+    room = dict(r_row)
+    if room["status"] != "ACTIVE":
+        return
+
+    now_ts = _draft_now_ts()
+    deadline = float(room["deadline_ts"] or 0)
+    if deadline <= 0 or now_ts < deadline:
+        return
+
+    cursor.execute("SELECT * FROM draft_teams WHERE room_id = ? ORDER BY draft_order ASC", (room_id,))
+    teams = [dict(x) for x in cursor.fetchall()]
+    if not teams:
+        return
+
+    avail = _draft_available_players(cursor, room)
+    if not avail or all(int(t["drafted_count"]) >= int(room["picks_per_team"]) for t in teams):
+        cursor.execute("UPDATE draft_rooms SET status = 'FINISHED', deadline_ts = 0 WHERE id = ?", (room_id,))
+        _draft_import_to_rosters(cursor, room_id)
+        return
+
+    if room["mode"] == "AUCTION":
+        pid = room["current_player_id"] or ""
+        high_team = room["current_high_team"] or room["current_nominator"] or ""
+        high_bid = int(room["current_high_bid"] or 1)
+        if pid and high_team:
+            t_map = {t["fantasy_team"]: t for t in teams}
+            winner = t_map.get(high_team)
+            if winner and int(winner["drafted_count"]) < int(room["picks_per_team"]):
+                max_b = _draft_max_bid(winner, room)
+                final_price = min(max(1, high_bid), max_b) if max_b > 0 else 0
+                if final_price > 0 or room["budget_per_team"] == 0:
+                    _draft_record_pick(cursor, room, winner, pid, final_price, is_auto=0)
+        cursor.execute("SELECT * FROM draft_rooms WHERE id = ?", (room_id,))
+        room = dict(cursor.fetchone())
+        cursor.execute("SELECT * FROM draft_teams WHERE room_id = ? ORDER BY draft_order ASC", (room_id,))
+        teams = [dict(x) for x in cursor.fetchall()]
+        _draft_advance_turn(cursor, room, teams, now_ts)
+    else:
+        turn_team = _draft_turn_team(teams, room["mode"], int(room["current_round"]), int(room["current_turn_idx"]))
+        if turn_team and int(turn_team["drafted_count"]) < int(room["picks_per_team"]):
+            chosen = _draft_random.choice(avail)
+            _draft_record_pick(cursor, room, turn_team, chosen["player_id"], 0, is_auto=1)
+        cursor.execute("SELECT * FROM draft_rooms WHERE id = ?", (room_id,))
+        room = dict(cursor.fetchone())
+        cursor.execute("SELECT * FROM draft_teams WHERE room_id = ? ORDER BY draft_order ASC", (room_id,))
+        teams = [dict(x) for x in cursor.fetchall()]
+        _draft_advance_turn(cursor, room, teams, now_ts)
+
+
+def _draft_import_to_rosters(cursor, room_id: int):
+    cursor.execute("SELECT * FROM draft_rooms WHERE id = ?", (room_id,))
+    r_row = cursor.fetchone()
+    if not r_row:
+        return 0
+    room = dict(r_row)
+    cursor.execute("SELECT * FROM draft_picks WHERE room_id = ? ORDER BY pick_no ASC", (room_id,))
+    picks = [dict(x) for x in cursor.fetchall()]
+    imported = 0
+    now_iso = _draft_now_iso()
+    for p in picks:
+        fteam = p["fantasy_team"]
+        pid = p["player_id"]
+        tslot = p["target_slot"] or "ACTIVE"
+        ok, _ = _draft_can_add_to_slot(cursor, fteam, tslot, extra_picks_in_room=0)
+        if not ok:
+            if tslot == "ACTIVE":
+                ok_m, _ = _draft_can_add_to_slot(cursor, fteam, "MINORS", extra_picks_in_room=0)
+                if ok_m:
+                    tslot = "MINORS"
+                else:
+                    continue
+            else:
+                continue
+        reason = f"選秀入隊({room['title']} #{p['pick_no']})"
+        cursor.execute("""
+            INSERT INTO team_rosters (player_id, fantasy_team, roster_slot, lineup_slot, slot_changed_at, status_reason)
+            VALUES (?, ?, ?, 'BN', ?, ?)
+            ON CONFLICT(player_id) DO UPDATE SET
+                fantasy_team = excluded.fantasy_team,
+                roster_slot = excluded.roster_slot,
+                lineup_slot = 'BN',
+                slot_changed_at = excluded.slot_changed_at,
+                status_reason = excluded.status_reason
+        """, (pid, fteam, tslot, now_iso, reason))
+        imported += 1
+    cursor.execute("UPDATE draft_rooms SET rosters_imported = 1 WHERE id = ?", (room_id,))
+    return imported
+
+
+def _draft_build_state(cursor, room_id: int) -> dict:
+    _draft_process_tick(cursor, room_id)
+    cursor.execute("SELECT * FROM draft_rooms WHERE id = ?", (room_id,))
+    r_row = cursor.fetchone()
+    if not r_row:
+        return {"error": "找不到選秀房間"}
+    room = dict(r_row)
+
+    cursor.execute("SELECT * FROM draft_teams WHERE room_id = ? ORDER BY draft_order ASC", (room_id,))
+    teams = [dict(x) for x in cursor.fetchall()]
+
+    avail = _draft_available_players(cursor, room)
+    avail_map = {p["player_id"]: p for p in avail}
+
+    cursor.execute("""
+        SELECT dp.*, COALESCE(pl.name, dp.player_id) AS player_name
+        FROM draft_picks dp
+        LEFT JOIN players pl ON pl.player_id = dp.player_id
+        WHERE dp.room_id = ?
+        ORDER BY dp.pick_no DESC
+    """, (room_id,))
+    picks = [dict(x) for x in cursor.fetchall()]
+
+    cursor.execute("""
+        SELECT db.*, COALESCE(pl.name, db.player_id) AS player_name
+        FROM draft_bids db
+        LEFT JOIN players pl ON pl.player_id = db.player_id
+        WHERE db.room_id = ?
+        ORDER BY db.id DESC
+        LIMIT 30
+    """, (room_id,))
+    bids = [dict(x) for x in cursor.fetchall()]
+
+    turn_team = _draft_turn_team(teams, room["mode"], int(room["current_round"]), int(room["current_turn_idx"]))
+    enriched_teams = []
+    for t in teams:
+        act_c, min_c = _draft_get_roster_counts(cursor, t["fantasy_team"])
+        t_copy = dict(t)
+        t_copy["active_roster_count"] = act_c
+        t_copy["minors_roster_count"] = min_c
+        t_copy["total_roster_count"] = act_c + min_c
+        t_copy["max_bid"] = _draft_max_bid(t, room)
+        enriched_teams.append(t_copy)
+
+    now_ts = _draft_now_ts()
+    rem_sec = max(0, int(round(float(room["deadline_ts"] or 0) - now_ts))) if room["status"] == "ACTIVE" else 0
+    cur_player = avail_map.get(room["current_player_id"]) if room["current_player_id"] else None
+    if not cur_player and room["current_player_id"]:
+        cursor.execute("SELECT player_id, name FROM players WHERE player_id = ?", (room["current_player_id"],))
+        pr = cursor.fetchone()
+        if pr:
+            cur_player = {"player_id": pr[0], "name": pr[1] or pr[0], "pos": "", "team": ""}
+
+    return {
+        "room": room,
+        "teams": enriched_teams,
+        "turn_team": turn_team["fantasy_team"] if turn_team else "",
+        "remaining_seconds": rem_sec,
+        "current_player": cur_player,
+        "available_players": avail,
+        "picks": picks,
+        "recent_bids": bids,
+        "server_ts": now_ts,
+    }
+
+@app.get("/api/draft/rooms")
+async def api_draft_rooms():
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        ensure_extended_schema(cursor)
+        ensure_draft_schema(cursor)
+        cursor.execute("SELECT * FROM draft_rooms ORDER BY id DESC")
+        rooms = [dict(r) for r in cursor.fetchall()]
+        conn.commit()
+        return JSONResponse({"ok": True, "rooms": rooms})
+    finally:
+        conn.close()
+
+
+@app.post("/api/draft/rooms")
+async def api_draft_create_room(payload: dict = Body(...)):
+    title = (payload.get("title") or "新選秀房").strip()
+    room_password = str(payload.get("room_password") or "").strip()
+    mode = (payload.get("mode") or "AUCTION").upper()
+    if mode not in {"AUCTION", "SNAKE", "LINEAR"}:
+        mode = "AUCTION"
+    target_slot = (payload.get("target_slot") or ("ACTIVE" if mode == "AUCTION" else "MINORS")).upper()
+    if target_slot not in {"ACTIVE", "MINORS"}:
+        target_slot = "ACTIVE"
+    picks_per_team = max(1, min(60, int(payload.get("picks_per_team") or 25)))
+    default_budget = max(0, int(payload.get("budget_per_team") or 260))
+    turn_seconds = max(5, min(600, int(payload.get("turn_seconds") or 30)))
+    bid_extend_seconds = max(3, min(120, int(payload.get("bid_extend_seconds") or 10)))
+    pool_mode = (payload.get("pool_mode") or "FA").upper()
+    if pool_mode not in {"FA", "CUSTOM"}:
+        pool_mode = "FA"
+
+    raw_custom = payload.get("custom_pool_ids") or []
+    if isinstance(raw_custom, str):
+        custom_ids = [x.strip() for x in raw_custom.replace(",", "\n").splitlines() if x.strip()]
+    else:
+        custom_ids = [str(x).strip() for x in raw_custom if str(x).strip()]
+
+    team_order = payload.get("team_order") or []
+    if not isinstance(team_order, list) or not team_order:
+        team_order = ["台灣山林", "台灣海洋"]
+    team_order = [str(t).strip() for t in team_order if str(t).strip()]
+
+    raw_team_budgets = payload.get("team_budgets") or {}
+    per_team_budget_map = {}
+    if isinstance(raw_team_budgets, dict):
+        for k, v in raw_team_budgets.items():
+            tkey = str(k).strip()
+            if tkey and v is not None and str(v).strip() != "":
+                try:
+                    per_team_budget_map[tkey] = max(0, int(v))
+                except Exception:
+                    pass
+    elif isinstance(raw_team_budgets, list):
+        for idx, v in enumerate(raw_team_budgets):
+            if idx < len(team_order) and v is not None and str(v).strip() != "":
+                try:
+                    per_team_budget_map[team_order[idx]] = max(0, int(v))
+                except Exception:
+                    pass
+
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        ensure_extended_schema(cursor)
+        ensure_draft_schema(cursor)
+        now_ts = _draft_now_ts()
+        nom_team = team_order[0] if mode == "AUCTION" else ""
+        cursor.execute("""
+            INSERT INTO draft_rooms (
+                title, room_password, mode, target_slot, picks_per_team, budget_per_team,
+                turn_seconds, bid_extend_seconds, pool_mode, custom_pool_json,
+                status, current_round, current_turn_idx, current_nominator,
+                deadline_ts, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 1, 0, ?, ?, ?)
+        """, (
+            title, room_password, mode, target_slot, picks_per_team, default_budget,
+            turn_seconds, bid_extend_seconds, pool_mode, _draft_json.dumps(custom_ids, ensure_ascii=False),
+            nom_team, now_ts + turn_seconds, _draft_now_iso()
+        ))
+        room_id = cursor.lastrowid
+        for idx, tname in enumerate(team_order, start=1):
+            if mode == "AUCTION":
+                init_budget = per_team_budget_map.get(tname, default_budget)
+            else:
+                init_budget = 0
+            cursor.execute("""
+                INSERT INTO draft_teams (room_id, fantasy_team, draft_order, remaining_budget, drafted_count)
+                VALUES (?, ?, ?, ?, 0)
+            """, (room_id, tname, idx, init_budget))
+        conn.commit()
+        return JSONResponse({"ok": True, "room_id": room_id})
+    finally:
+        conn.close()
+
+
+
+@app.post("/api/draft/rooms/{room_id}/auth")
+async def api_draft_auth(room_id: int, payload: dict = Body(...)):
+    fteam = (payload.get("fantasy_team") or "").strip()
+    pwd = str(payload.get("password") or "").strip()
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        ensure_extended_schema(cursor)
+        ensure_draft_schema(cursor)
+        cursor.execute("SELECT id, title, room_password FROM draft_rooms WHERE id = ?", (room_id,))
+        r_row = cursor.fetchone()
+        if not r_row:
+            return JSONResponse({"ok": False, "error": "找不到選秀房間"}, status_code=404)
+        expected_pwd = str(r_row["room_password"] if hasattr(r_row, "__getitem__") else r_row[2] or "").strip()
+        if expected_pwd and pwd != expected_pwd:
+            return JSONResponse({"ok": False, "error": "選秀房密碼錯誤"})
+        cursor.execute("SELECT fantasy_team FROM draft_teams WHERE room_id = ?", (room_id,))
+        valid_teams = {str(x[0]).strip() for x in cursor.fetchall()}
+        if not fteam or fteam not in valid_teams:
+            return JSONResponse({"ok": False, "error": "請選擇本房間有效的隊伍名稱"})
+        return JSONResponse({"ok": True, "fantasy_team": fteam})
+    finally:
+        conn.close()
+
+
+@app.get("/api/draft/rooms/{room_id}/state")
+async def api_draft_state(room_id: int):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        ensure_extended_schema(cursor)
+        ensure_draft_schema(cursor)
+        state = _draft_build_state(cursor, room_id)
+        conn.commit()
+        if "error" in state:
+            return JSONResponse({"ok": False, "error": state["error"]}, status_code=404)
+        return JSONResponse({"ok": True, **state})
+    finally:
+        conn.close()
+
+
+@app.post("/api/draft/rooms/{room_id}/nominate")
+async def api_draft_nominate(room_id: int, payload: dict = Body(...)):
+    fteam = (payload.get("fantasy_team") or "").strip()
+    player_id = (payload.get("player_id") or "").strip()
+    start_bid = max(1, int(payload.get("start_bid") or 1))
+
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        ensure_extended_schema(cursor)
+        ensure_draft_schema(cursor)
+        _draft_process_tick(cursor, room_id)
+        cursor.execute("SELECT * FROM draft_rooms WHERE id = ?", (room_id,))
+        r_row = cursor.fetchone()
+        if not r_row:
+            return JSONResponse({"ok": False, "error": "找不到房間"}, status_code=404)
+        room = dict(r_row)
+        if room["status"] != "ACTIVE" or room["mode"] != "AUCTION":
+            return JSONResponse({"ok": False, "error": "目前不是競標進行中"})
+        if room["current_player_id"]:
+            return JSONResponse({"ok": False, "error": "目前已有競標中的球員"})
+        if room["current_nominator"] and fteam != room["current_nominator"]:
+            return JSONResponse({"ok": False, "error": f"目前由 {room['current_nominator']} 負責提名"})
+
+        cursor.execute("SELECT * FROM draft_teams WHERE room_id = ? AND fantasy_team = ?", (room_id, fteam))
+        t_row = cursor.fetchone()
+        if not t_row:
+            return JSONResponse({"ok": False, "error": "無效的球隊"})
+        t_dict = dict(t_row)
+        max_b = _draft_max_bid(t_dict, room)
+        if start_bid > max_b:
+            return JSONResponse({"ok": False, "error": f"起標價 {start_bid} 超過可出上限 {max_b} 元"})
+
+        ok_slot, slot_msg = _draft_can_add_to_slot(cursor, fteam, room["target_slot"], extra_picks_in_room=0)
+        if not ok_slot:
+            return JSONResponse({"ok": False, "error": slot_msg})
+
+        avail_ids = {p["player_id"] for p in _draft_available_players(cursor, room)}
+        if player_id not in avail_ids:
+            return JSONResponse({"ok": False, "error": "該球員不可選或已被選走"})
+
+        now_ts = _draft_now_ts()
+        deadline = now_ts + int(room["bid_extend_seconds"])
+        cursor.execute("""
+            UPDATE draft_rooms
+            SET current_player_id = ?, current_high_bid = ?, current_high_team = ?, deadline_ts = ?
+            WHERE id = ?
+        """, (player_id, start_bid, fteam, deadline, room_id))
+        cursor.execute("""
+            INSERT INTO draft_bids (room_id, player_id, fantasy_team, amount, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (room_id, player_id, fteam, start_bid, _draft_now_iso()))
+        conn.commit()
+        return JSONResponse({"ok": True})
+    finally:
+        conn.close()
+
+
+@app.post("/api/draft/rooms/{room_id}/bid")
+async def api_draft_bid(room_id: int, payload: dict = Body(...)):
+    fteam = (payload.get("fantasy_team") or "").strip()
+    amount = int(payload.get("amount") or 0)
+
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        ensure_extended_schema(cursor)
+        ensure_draft_schema(cursor)
+        _draft_process_tick(cursor, room_id)
+        cursor.execute("SELECT * FROM draft_rooms WHERE id = ?", (room_id,))
+        r_row = cursor.fetchone()
+        if not r_row:
+            return JSONResponse({"ok": False, "error": "找不到房間"}, status_code=404)
+        room = dict(r_row)
+        if room["status"] != "ACTIVE" or room["mode"] != "AUCTION" or not room["current_player_id"]:
+            return JSONResponse({"ok": False, "error": "目前沒有進行中的競標"})
+
+        min_req = int(room["current_high_bid"]) + 1
+        if amount < min_req:
+            return JSONResponse({"ok": False, "error": f"出價需至少 {min_req} 元"})
+
+        cursor.execute("SELECT * FROM draft_teams WHERE room_id = ? AND fantasy_team = ?", (room_id, fteam))
+        t_row = cursor.fetchone()
+        if not t_row:
+            return JSONResponse({"ok": False, "error": "無效的球隊"})
+        t_dict = dict(t_row)
+        max_b = _draft_max_bid(t_dict, room)
+        if amount > max_b:
+            return JSONResponse({"ok": False, "error": f"超過可出上限（剩餘預算扣掉保留名額後最高 {max_b} 元）"})
+
+        ok_slot, slot_msg = _draft_can_add_to_slot(cursor, fteam, room["target_slot"], extra_picks_in_room=0)
+        if not ok_slot:
+            return JSONResponse({"ok": False, "error": slot_msg})
+
+        now_ts = _draft_now_ts()
+        deadline = now_ts + int(room["bid_extend_seconds"])
+        cursor.execute("""
+            UPDATE draft_rooms
+            SET current_high_bid = ?, current_high_team = ?, deadline_ts = ?
+            WHERE id = ?
+        """, (amount, fteam, deadline, room_id))
+        cursor.execute("""
+            INSERT INTO draft_bids (room_id, player_id, fantasy_team, amount, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (room_id, room["current_player_id"], fteam, amount, _draft_now_iso()))
+        conn.commit()
+        return JSONResponse({"ok": True})
+    finally:
+        conn.close()
+
+
+@app.post("/api/draft/rooms/{room_id}/pick")
+async def api_draft_pick(room_id: int, payload: dict = Body(...)):
+    fteam = (payload.get("fantasy_team") or "").strip()
+    player_id = (payload.get("player_id") or "").strip()
+
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        ensure_extended_schema(cursor)
+        ensure_draft_schema(cursor)
+        _draft_process_tick(cursor, room_id)
+        cursor.execute("SELECT * FROM draft_rooms WHERE id = ?", (room_id,))
+        r_row = cursor.fetchone()
+        if not r_row:
+            return JSONResponse({"ok": False, "error": "找不到房間"}, status_code=404)
+        room = dict(r_row)
+        if room["status"] != "ACTIVE" or room["mode"] == "AUCTION":
+            return JSONResponse({"ok": False, "error": "目前不是指名選秀階段"})
+
+        cursor.execute("SELECT * FROM draft_teams WHERE room_id = ? ORDER BY draft_order ASC", (room_id,))
+        teams = [dict(x) for x in cursor.fetchall()]
+        turn_team = _draft_turn_team(teams, room["mode"], int(room["current_round"]), int(room["current_turn_idx"]))
+        if not turn_team or turn_team["fantasy_team"] != fteam:
+            return JSONResponse({"ok": False, "error": f"目前輪到 {turn_team['fantasy_team'] if turn_team else ''} 指名"})
+
+        ok_slot, slot_msg = _draft_can_add_to_slot(cursor, fteam, room["target_slot"], extra_picks_in_room=0)
+        if not ok_slot:
+            return JSONResponse({"ok": False, "error": slot_msg})
+
+        avail_ids = {p["player_id"] for p in _draft_available_players(cursor, room)}
+        if player_id not in avail_ids:
+            return JSONResponse({"ok": False, "error": "該球員不可選或已被選走"})
+
+        _draft_record_pick(cursor, room, turn_team, player_id, 0, is_auto=0)
+        cursor.execute("SELECT * FROM draft_rooms WHERE id = ?", (room_id,))
+        room = dict(cursor.fetchone())
+        cursor.execute("SELECT * FROM draft_teams WHERE room_id = ? ORDER BY draft_order ASC", (room_id,))
+        teams = [dict(x) for x in cursor.fetchall()]
+        _draft_advance_turn(cursor, room, teams, _draft_now_ts())
+        conn.commit()
+        return JSONResponse({"ok": True})
+    finally:
+        conn.close()
+
+
+@app.post("/api/draft/rooms/{room_id}/finish")
+async def api_draft_finish(room_id: int):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        ensure_extended_schema(cursor)
+        ensure_draft_schema(cursor)
+        cursor.execute("""
+            UPDATE draft_rooms
+            SET status = 'FINISHED', current_player_id = '', deadline_ts = 0
+            WHERE id = ?
+        """, (room_id,))
+        imported = _draft_import_to_rosters(cursor, room_id)
+        conn.commit()
+        return JSONResponse({"ok": True, "imported": imported})
+    finally:
+        conn.close()
+
+@app.get("/draft")
+async def page_draft(request: Request):
+    import inspect
+    ctx = {"request": request}
+    try:
+        sig = inspect.signature(templates.TemplateResponse)
+        params = list(sig.parameters.keys())
+        if params and params[0] == "request":
+            return templates.TemplateResponse(request, "draft.html", {})
+    except Exception:
+        pass
+    return templates.TemplateResponse("draft.html", ctx)
+
+# === DRAFT SYSTEM END ===
+def _draft_init_after_main():
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        ensure_draft_schema(cur)
+        conn.commit()
+    finally:
+        conn.close()
+
+_draft_init_after_main()

@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>選秀中心 - 競標與指名</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
+    nav { background: #1e293b; padding: 12px 20px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; border-bottom: 1px solid #334155; }
+    nav a { color: #cbd5e1; text-decoration: none; font-weight: 600; padding: 6px 12px; border-radius: 6px; background: #0f172a; border: 1px solid #334155; }
+    nav a:hover, nav a.active { color: #38bdf8; border-color: #38bdf8; }
+    .container { max-width: 1320px; margin: 18px auto; padding: 0 16px; display: grid; gap: 16px; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 16px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 16px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+    input, select, textarea, button { background: #0f172a; color: #f8fafc; border: 1px solid #475569; border-radius: 6px; padding: 7px 10px; font-size: 14px; }
+    button { background: #0284c7; border-color: #0284c7; font-weight: 600; cursor: pointer; }
+    button:hover { background: #0369a1; }
+    button.secondary { background: #334155; border-color: #475569; }
+    button.warn { background: #b45309; border-color: #b45309; }
+    .timer { font-size: 28px; font-weight: 800; color: #38bdf8; }
+    .pool-list { max-height: 360px; overflow-y: auto; border: 1px solid #334155; border-radius: 8px; }
+    .pool-item { display: flex; justify-content: space-between; align-items: center; padding: 7px 10px; border-bottom: 1px solid #263349; font-size: 13px; gap: 8px; }
+    .muted { color: #94a3b8; font-size: 13px; }
+    .ok { color: #34d399; font-size: 13px; font-weight: 600; }
+    .msg { color: #fbbf24; font-size: 13px; min-height: 18px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: #0f172a; border: 1px solid #475569; color: #38bdf8; }
+    .budget-grid { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; padding: 10px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/">首頁</a>
+    <a href="/roster">名單</a>
+    <a href="/standings">戰績</a>
+    <a href="/matchup">調度</a>
+    <a href="/draft" class="active">選秀</a>
+  </nav>
+
+  <div class="container">
+    <!-- 建房與選房 -->
+    <div class="card">
+      <div class="row" style="justify-content: space-between;">
+        <div>
+          <strong>建立 / 切換選秀房間</strong>
+          <span class="muted">（可設定房間密碼與各隊年度預算；一軍上限 25 人、一二軍合計上限 60 人，結束自動入隊）</span>
+        </div>
+        <div class="row" style="margin-bottom:0;">
+          <button type="button" class="secondary" onclick="applyPreset('AUCTION_25')">開季一軍競標(25人)</button>
+          <button type="button" class="secondary" onclick="applyPreset('MINORS_DRAFT')">開季二軍指名</button>
+          <button type="button" class="secondary" onclick="applyPreset('ROOKIE_DRAFT')">季中新秀指名</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <input id="roomTitle" placeholder="選秀房名稱" value="2026 開季一軍競標" style="min-width:170px;" />
+        <input id="roomPassword" type="text" placeholder="房間密碼（可留空）" style="width:150px;" />
+        <select id="roomMode">
+          <option value="AUCTION">競標型 (AUCTION)</option>
+          <option value="SNAKE">蛇行指名 (SNAKE)</option>
+          <option value="LINEAR">固定順位指名 (LINEAR)</option>
+        </select>
+        <select id="targetSlot">
+          <option value="ACTIVE">入隊：一軍 (ACTIVE)</option>
+          <option value="MINORS">入隊：二軍 (MINORS)</option>
+        </select>
+        <label class="muted">人數 <input id="picksPerTeam" type="number" value="25" min="1" max="60" style="width:64px;" /></label>
+        <label class="muted">預設預算 <input id="budgetPerTeam" type="number" value="260" min="0" style="width:74px;" onchange="rebuildTeamBudgetInputs(false)" /></label>
+        <label class="muted">秒數 <input id="turnSeconds" type="number" value="30" min="5" max="600" style="width:64px;" /></label>
+        <label class="muted">加價延秒 <input id="bidExtend" type="number" value="10" min="3" max="120" style="width:64px;" /></label>
+      </div>
+
+      <div class="row">
+        <label class="muted">隊伍順位（逗號分隔）
+          <input id="teamOrderInput" value="台灣山林, 台灣海洋" style="width:220px;" oninput="rebuildTeamBudgetInputs(false)" />
+        </label>
+        <select id="poolMode">
+          <option value="FA">球員池：全體自由球員</option>
+          <option value="CUSTOM">球員池：指定球員 ID 清單</option>
+        </select>
+        <button type="button" onclick="createRoom()">建立並進入選秀房</button>
+        <label class="muted">切換房間：<select id="roomSelect" onchange="selectRoom(this.value)"></select></label>
+      </div>
+
+      <!-- 各隊年度預算設定區 -->
+      <div class="budget-grid">
+        <strong style="font-size:13px;">各隊預算設定（競標模式）：</strong>
+        <div id="perTeamBudgetInputs" class="row" style="margin-bottom:0;"></div>
+        <button type="button" class="secondary" onclick="rebuildTeamBudgetInputs(true)">全部套用預設預算</button>
+      </div>
+
+      <textarea id="customPoolInput" rows="2" placeholder="若選『指定球員 ID 清單』，請每行或逗號輸入 player_id" style="width:100%; box-sizing:border-box;"></textarea>
+    </div>
+
+    <!-- 進房隊名與密碼驗證 -->
+    <div class="card">
+      <div class="row" style="justify-content: space-between;">
+        <div>
+          <strong>選秀房身分驗證（隊名 / 密碼）</strong>
+          <span class="muted">—— 其他玩家進入選秀房後，先選擇自己的隊伍並輸入房間密碼驗證，即可代表該隊提名、出價或指名。</span>
+        </div>
+        <span id="authStatusBadge" class="badge">尚未驗證隊伍</span>
+      </div>
+      <div class="row" style="margin-bottom:0;">
+        <label class="muted">選擇隊伍：
+          <select id="joinTeamSelect" style="min-width:140px;"></select>
+        </label>
+        <label class="muted">房間密碼：
+          <input id="joinPasswordInput" type="password" placeholder="有設密碼才需輸入" style="width:160px;" />
+        </label>
+        <button type="button" onclick="verifyRoomAccess()">確認進入並鎖定隊伍</button>
+        <button type="button" class="secondary" onclick="clearRoomAccess()">切換/登出隊伍</button>
+        <span id="authMsg" class="msg"></span>
+      </div>
+    </div>
+
+    <!-- 選秀進行區 -->
+    <div class="grid-3">
+      <div class="card">
+        <div class="row" style="justify-content:space-between;">
+          <strong id="roomHeading">尚未選擇房間</strong>
+          <button type="button" class="warn" onclick="finishRoom()">結束選秀並匯入名單</button>
+        </div>
+        <div class="row">
+          <span>目前操作隊伍：<strong id="verifiedTeamLabel" class="ok">未鎖定</strong></span>
+          <span class="muted" id="roundInfo"></span>
+        </div>
+        <div class="row">
+          <div>倒數：<span class="timer" id="timerText">--</span> 秒</div>
+          <div class="muted" id="turnInfo"></div>
+        </div>
+        <div id="auctionBox" style="display:none; border-top:1px solid #334155; padding-top:10px; margin-top:8px;">
+          <div>競標中球員：<strong id="curPlayerName">尚未提名</strong></div>
+          <div>目前最高價：<strong id="curHighBid">0</strong> 元（<span id="curHighTeam">-</span>）</div>
+          <div class="row" style="margin-top:8px;">
+            <input id="bidAmount" type="number" min="1" placeholder="出價金額" style="width:110px;" />
+            <button type="button" onclick="submitBid()">送出出價</button>
+          </div>
+        </div>
+        <div id="actionMsg" class="msg"></div>
+      </div>
+
+      <div class="card">
+        <div class="row" style="justify-content:space-between;">
+          <strong>可選球員池</strong>
+          <input id="searchPlayer" placeholder="搜尋姓名、守位、球隊..." oninput="renderPool()" style="width:170px;" />
+        </div>
+        <div id="poolList" class="pool-list"></div>
+      </div>
+
+      <div class="card">
+        <strong>各隊狀態與最新選秀紀錄</strong>
+        <div id="teamsBoard" style="margin-top:8px;"></div>
+        <div class="muted" style="margin-top:12px;">最近中選</div>
+        <div id="picksLog" class="pool-list" style="max-height:180px; margin-top:4px;"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+let currentRoomId = null;
+let latestState = null;
+let verifiedTeamByRoom = {};
+
+function rebuildTeamBudgetInputs(overwriteWithDefault = false) {
+  const container = document.getElementById('perTeamBudgetInputs');
+  if (!container) return;
+  const teams = teamOrderInput.value.split(',').map(s => s.trim()).filter(Boolean);
+  const defBudget = Number(budgetPerTeam.value || 260);
+  const existing = {};
+  container.querySelectorAll('input[data-team]').forEach(inp => {
+    existing[inp.dataset.team] = inp.value;
+  });
+  container.innerHTML = teams.map(t => {
+    const val = (!overwriteWithDefault && existing[t] !== undefined && existing[t] !== '') ? existing[t] : defBudget;
+    return `<label class="muted">${t}：<input type="number" min="0" data-team="${t}" value="${val}" style="width:82px;" /></label>`;
+  }).join('');
+}
+
+function collectTeamBudgets() {
+  const map = {};
+  document.querySelectorAll('#perTeamBudgetInputs input[data-team]').forEach(inp => {
+    const t = inp.dataset.team;
+    if (t && inp.value !== '') map[t] = Math.max(0, Number(inp.value));
+  });
+  return map;
+}
+
+function applyPreset(type) {
+  if (type === 'AUCTION_25') {
+    roomTitle.value = '開季一軍競標';
+    roomMode.value = 'AUCTION';
+    targetSlot.value = 'ACTIVE';
+    picksPerTeam.value = 25;
+    budgetPerTeam.value = 260;
+    turnSeconds.value = 30;
+    bidExtend.value = 10;
+    poolMode.value = 'FA';
+    rebuildTeamBudgetInputs(true);
+  } else if (type === 'MINORS_DRAFT') {
+    roomTitle.value = '開季二軍指名';
+    roomMode.value = 'SNAKE';
+    targetSlot.value = 'MINORS';
+    picksPerTeam.value = 10;
+    budgetPerTeam.value = 0;
+    turnSeconds.value = 45;
+    poolMode.value = 'FA';
+    rebuildTeamBudgetInputs(true);
+  } else if (type === 'ROOKIE_DRAFT') {
+    roomTitle.value = '季中新秀指名';
+    roomMode.value = 'LINEAR';
+    targetSlot.value = 'MINORS';
+    picksPerTeam.value = 5;
+    budgetPerTeam.value = 0;
+    turnSeconds.value = 45;
+    poolMode.value = 'CUSTOM';
+    rebuildTeamBudgetInputs(true);
+  }
+}
+
+function getActiveTeam() {
+  if (!currentRoomId) return '';
+  return verifiedTeamByRoom[String(currentRoomId)] || '';
+}
+
+function updateAuthUI() {
+  const t = getActiveTeam();
+  if (t) {
+    authStatusBadge.textContent = `已驗證：${t}`;
+    verifiedTeamLabel.textContent = t;
+    verifiedTeamLabel.className = 'ok';
+  } else {
+    authStatusBadge.textContent = '尚未驗證隊伍';
+    verifiedTeamLabel.textContent = '未鎖定（請先在上方驗證隊名/密碼）';
+    verifiedTeamLabel.className = 'msg';
+  }
+}
+
+async function verifyRoomAccess() {
+  authMsg.textContent = '';
+  if (!currentRoomId) {
+    authMsg.textContent = '請先選擇或建立選秀房間';
+    return;
+  }
+  const fteam = joinTeamSelect.value;
+  const pwd = joinPasswordInput.value;
+  const res = await fetch(`/api/draft/rooms/${currentRoomId}/auth`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ fantasy_team: fteam, password: pwd })
+  });
+  const data = await res.json();
+  if (data.ok) {
+    verifiedTeamByRoom[String(currentRoomId)] = data.fantasy_team;
+    authMsg.textContent = `已成功以「${data.fantasy_team}」進入選秀房`;
+    updateAuthUI();
+  } else {
+    authMsg.textContent = data.error || '驗證失敗';
+  }
+}
+
+function clearRoomAccess() {
+  if (!currentRoomId) return;
+  delete verifiedTeamByRoom[String(currentRoomId)];
+  authMsg.textContent = '已解除目前隊伍鎖定，可重新輸入隊名與密碼';
+  updateAuthUI();
+}
+
+async function loadRooms(selectId = null) {
+  const res = await fetch('/api/draft/rooms');
+  const data = await res.json();
+  if (!data.ok) return;
+  roomSelect.innerHTML = data.rooms.map(r =>
+    `<option value="${r.id}">#${r.id} ${r.title} (${r.mode} / ${r.status})</option>`
+  ).join('');
+  if (selectId) {
+    currentRoomId = Number(selectId);
+    roomSelect.value = String(currentRoomId);
+  } else if (!currentRoomId && data.rooms.length > 0) {
+    currentRoomId = data.rooms[0].id;
+    roomSelect.value = String(currentRoomId);
+  }
+  updateAuthUI();
+}
+
+function selectRoom(id) {
+  currentRoomId = Number(id);
+  authMsg.textContent = '';
+  actionMsg.textContent = '';
+  updateAuthUI();
+  pollState();
+}
+
+async function createRoom() {
+  actionMsg.textContent = '';
+  const order = teamOrderInput.value.split(',').map(s => s.trim()).filter(Boolean);
+  const res = await fetch('/api/draft/rooms', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      title: roomTitle.value.trim() || '新選秀房',
+      room_password: roomPassword.value.trim(),
+      mode: roomMode.value,
+      target_slot: targetSlot.value,
+      picks_per_team: Number(picksPerTeam.value || 25),
+      budget_per_team: Number(budgetPerTeam.value || 0),
+      team_budgets: collectTeamBudgets(),
+      turn_seconds: Number(turnSeconds.value || 30),
+      bid_extend_seconds: Number(bidExtend.value || 10),
+      pool_mode: poolMode.value,
+      custom_pool_ids: customPoolInput.value,
+      team_order: order
+    })
+  });
+  const data = await res.json();
+  if (data.ok) {
+    if (order.length > 0) {
+      verifiedTeamByRoom[String(data.room_id)] = order[0];
+    }
+    await loadRooms(data.room_id);
+    updateAuthUI();
+    pollState();
+  } else {
+    actionMsg.textContent = data.error || '建房失敗';
+  }
+}
+
+async function pollState() {
+  if (!currentRoomId) return;
+  const res = await fetch(`/api/draft/rooms/${currentRoomId}/state`);
+  const data = await res.json();
+  if (!data.ok) return;
+  latestState = data;
+  renderState(data);
+}
+
+function renderState(data) {
+  const { room, teams, turn_team, remaining_seconds, current_player, picks } = data;
+  roomHeading.textContent = `#${room.id} ${room.title}（${room.status}）`;
+  roundInfo.textContent = `第 ${room.current_round} 輪｜入隊：${room.target_slot}`;
+  timerText.textContent = remaining_seconds;
+  turnInfo.textContent = room.mode === 'AUCTION'
+    ? `提名輪值：${room.current_nominator || '-'}`
+    : `目前指名：${turn_team || '-'}`;
+
+  const prevJoin = joinTeamSelect.value;
+  joinTeamSelect.innerHTML = teams.map(t => `<option value="${t.fantasy_team}">${t.fantasy_team}</option>`).join('');
+  if (prevJoin && teams.some(t => t.fantasy_team === prevJoin)) {
+    joinTeamSelect.value = prevJoin;
+  } else if (getActiveTeam() && teams.some(t => t.fantasy_team === getActiveTeam())) {
+    joinTeamSelect.value = getActiveTeam();
+  }
+  updateAuthUI();
+
+  auctionBox.style.display = room.mode === 'AUCTION' ? 'block' : 'none';
+  if (room.mode === 'AUCTION') {
+    curPlayerName.textContent = current_player ? `${current_player.name} (${current_player.pos || '-'})` : '尚未提名（請在右側選一位球員出價提名）';
+    curHighBid.textContent = room.current_high_bid || 0;
+    curHighTeam.textContent = room.current_high_team || '-';
+  }
+
+  teamsBoard.innerHTML = teams.map(t =>
+    `<div class="pool-item">
+      <div><strong>${t.fantasy_team}</strong> <span class="muted">(順位 #${t.draft_order})</span></div>
+      <div class="muted">已選 ${t.drafted_count}/${room.picks_per_team}｜一軍 ${t.active_roster_count}/25｜總計 ${t.total_roster_count}/60${room.mode === 'AUCTION' ? `｜剩 $${t.remaining_budget} (上限 $${t.max_bid})` : ''}</div>
+    </div>`
+  ).join('');
+
+  picksLog.innerHTML = picks.map(p =>
+    `<div class="pool-item">
+      <span>#${p.pick_no} <strong>${p.fantasy_team}</strong> → ${p.player_name}</span>
+      <span class="muted">${p.price ? `$${p.price}` : (p.is_auto ? '隨機' : '指名')}</span>
+    </div>`
+  ).join('');
+
+  renderPool();
+}
+
+function renderPool() {
+  if (!latestState) return;
+  const kw = (searchPlayer.value || '').trim().toLowerCase();
+  const list = latestState.available_players.filter(p =>
+    !kw || p.name.toLowerCase().includes(kw) || p.pos.toLowerCase().includes(kw) || p.team.toLowerCase().includes(kw)
+  );
+  const mode = latestState.room.mode;
+  poolList.innerHTML = list.slice(0, 120).map(p => {
+    const btnLabel = mode === 'AUCTION' ? '提名出價' : '指名選入';
+    return `<div class="pool-item">
+      <div><strong>${p.name}</strong> <span class="muted">${p.pos || ''} ${p.team || ''}</span></div>
+      <button type="button" onclick="onPlayerAction('${p.player_id}')">${btnLabel}</button>
+    </div>`;
+  }).join('') || '<div class="pool-item muted">無可選球員</div>';
+}
+
+function requireVerifiedTeam() {
+  const fteam = getActiveTeam();
+  if (!fteam) {
+    actionMsg.textContent = '請先在上方「選秀房身分驗證」選擇隊伍並輸入密碼確認進入';
+    return '';
+  }
+  return fteam;
+}
+
+async function onPlayerAction(playerId) {
+  actionMsg.textContent = '';
+  const fteam = requireVerifiedTeam();
+  if (!fteam) return;
+  if (latestState.room.mode === 'AUCTION') {
+    const startBid = Number(bidAmount.value || 1);
+    const res = await fetch(`/api/draft/rooms/${currentRoomId}/nominate`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ fantasy_team: fteam, player_id: playerId, start_bid: startBid })
+    });
+    const d = await res.json();
+    if (!d.ok) actionMsg.textContent = d.error;
+  } else {
+    const res = await fetch(`/api/draft/rooms/${currentRoomId}/pick`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ fantasy_team: fteam, player_id: playerId })
+    });
+    const d = await res.json();
+    if (!d.ok) actionMsg.textContent = d.error;
+  }
+  pollState();
+}
+
+async function submitBid() {
+  actionMsg.textContent = '';
+  const fteam = requireVerifiedTeam();
+  if (!fteam) return;
+  const amt = Number(bidAmount.value || 0);
+  const res = await fetch(`/api/draft/rooms/${currentRoomId}/bid`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ fantasy_team: fteam, amount: amt })
+  });
+  const d = await res.json();
+  if (!d.ok) actionMsg.textContent = d.error;
+  pollState();
+}
+
+async function finishRoom() {
+  if (!currentRoomId) return;
+  const res = await fetch(`/api/draft/rooms/${currentRoomId}/finish`, { method: 'POST' });
+  const d = await res.json();
+  if (d.ok) actionMsg.textContent = `已結束選秀並匯入 ${d.imported} 位球員至球隊名單`;
+  pollState();
+}
+
+rebuildTeamBudgetInputs(true);
+loadRooms().then(() => {
+  pollState();
+  setInterval(pollState, 1500);
+});
+</script>
+</body>
+</html>
