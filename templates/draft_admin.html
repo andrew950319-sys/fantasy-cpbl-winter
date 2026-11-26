@@ -1,193 +1,61 @@
-<!doctype html>
-<html lang="zh-Hant">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>選秀後台管理</title>
-  <style>
-    body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
-    nav { background: #1e293b; padding: 12px 20px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; border-bottom: 1px solid #334155; }
-    nav { position: relative; z-index: 50; pointer-events: auto; }
-    nav a { position: relative; z-index: 51; pointer-events: auto; cursor: pointer; color: #cbd5e1; text-decoration: none; font-weight: 600; padding: 6px 12px; border-radius: 6px; background: #0f172a; border: 1px solid #334155; }
-    nav a:hover, nav a.active { color: #38bdf8; border-color: #38bdf8; }
-    .container { max-width: 1180px; margin: 20px auto; padding: 0 16px; display: grid; gap: 16px; }
-    .card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 16px; }
-    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
-    input, select, textarea, button { background: #0f172a; color: #f8fafc; border: 1px solid #475569; border-radius: 6px; padding: 8px 11px; font-size: 14px; }
-    button { background: #0284c7; border-color: #0284c7; font-weight: 600; cursor: pointer; }
-    button:hover { background: #0369a1; }
-    button.secondary { background: #334155; border-color: #475569; }
-    button.start { background: #059669; border-color: #059669; }
-    button.warn { background: #b45309; border-color: #b45309; }
-    .budget-grid { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; padding: 10px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; margin-bottom: 10px; }
-    .muted { color: #94a3b8; font-size: 13px; }
-    .msg { color: #34d399; font-size: 13px; min-height: 18px; }
-  </style>
-</head>
-<body>
-          <nav style="position: relative; z-index: 50;">
-    <a href="/">首頁</a>
-    <a href="/roster">名單</a>
-    <a href="/standings">戰績</a>
-    <a href="/matchup">調度</a>
-    <a href="/draft/admin" class="active">選秀</a>
-  </nav>
-
-  <div class="container">
-    <div class="card">
-      <div class="row" style="justify-content: space-between;">
-        <div>
-          <strong>建立選秀房間（僅建立房間與設定資料，不會直接開始）</strong>
-          <span class="muted">—— 建好後玩家可在 /draft 選隊伍與密碼加入，準備好再點下方「開始選秀」。</span>
-        </div>
-        <div class="row" style="margin-bottom:0;">
-          <button type="button" class="secondary" onclick="applyPreset('AUCTION_25')">開季一軍競標(25人)</button>
-          <button type="button" class="secondary" onclick="applyPreset('MINORS_DRAFT')">開季二軍指名</button>
-          <button type="button" class="secondary" onclick="applyPreset('ROOKIE_DRAFT')">季中新秀指名</button>
-        </div>
+<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'/><meta name='viewport' content='width=device-width,initial-scale=1'/><title>選秀後台 - 房間設定</title><style>body{font-family:system-ui,sans-serif;margin:0;background:#0f172a;color:#e2e8f0}nav{background:#1e293b;padding:12px 20px;display:flex;gap:12px;flex-wrap:wrap;border-bottom:1px solid #334155}nav a{color:#cbd5e1;text-decoration:none;font-weight:600;padding:6px 12px;border-radius:6px;background:#0f172a;border:1px solid #334155}nav a.active{color:#38bdf8;border-color:#38bdf8}.wrap{max-width:1280px;margin:20px auto;padding:0 16px;display:grid;gap:16px}.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px}.card{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}label{font-size:13px;color:#cbd5e1;display:flex;flex-direction:column;gap:4px}input,select,button{background:#0f172a;color:#f8fafc;border:1px solid #475569;border-radius:6px;padding:8px 11px;font-size:14px}button{background:#0284c7;border-color:#0284c7;font-weight:600;cursor:pointer}button:hover{background:#0369a1}button.secondary{background:#334155;border-color:#475569}.muted{color:#94a3b8;font-size:13px}.msg{color:#fbbf24;font-size:13px;min-height:18px}.room-item{border:1px solid #334155;border-radius:8px;padding:10px 12px;margin-bottom:8px;background:#0f172a}.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;background:#1e293b;border:1px solid #475569;color:#38bdf8}</style></head><body><nav><a href='/'>首頁</a><a href='/roster'>名單</a><a href='/standings'>戰績</a><a href='/matchup'>調度</a><a href='/draft'>前台加入</a><a href='/draft/admin' class='active'>選秀設定</a></nav><div class='wrap'><div class='grid2'><div class='card'><strong>建立 / 設定選秀房間</strong><div class='muted' style='margin:4px 0 12px'>設定房間名稱、模式、預算、每位上限、秒數、密碼與隊伍順序</div><div class='row'><label style='flex:1;min-width:180px'>房間名稱<input id='titleInput' placeholder='例：2026 季前選秀'/></label><label>選秀模式<select id='modeInput'><option value='AUCTION'>競標選秀 (AUCTION)</option><option value='SNAKE'>蛇形選秀 (SNAKE)</option><option value='LINEAR'>直線選秀 (LINEAR)</option></select></label><label>入隊位置<select id='slotInput'><option value='ACTIVE'>先發/輪值 (ACTIVE)</option><option value='MINORS'>小聯盟/替補 (MINORS)</option></select></label></div><div class='row'><label>每隊預算<input id='budgetInput' type='number' value='260' min='0' style='width:95px'/></label><label>每隊上限<input id='picksInput' type='number' value='25' min='1' max='60' style='width:95px'/></label><label>回合秒數<input id='secInput' type='number' value='30' min='5' max='600' style='width:95px'/></label><label>延長秒數<input id='extInput' type='number' value='10' min='3' max='120' style='width:95px'/></label></div><div class='row'><label>球員池<select id='poolModeInput'><option value='FA'>自由球員 (FA)</option><option value='CUSTOM'>自訂名單 (CUSTOM)</option></select></label><label>房間密碼<input id='pwInput' type='text' placeholder='留空免密碼' style='width:140px'/></label><label style='flex:1;min-width:180px'>參與隊伍順序（逗號分隔）<input id='teamsInput' placeholder='台灣山林, 台灣海洋'/></label></div><div class='row' style='margin-bottom:0'><button type='button' onclick='createRoom()'>建立選秀房間</button><button type='button' class='secondary' onclick='loadRooms()'>重新整理列表</button></div><div id='adminMsg' class='msg' style='margin-top:8px'></div></div><div class='card'><div class='row' style='justify-content:space-between'><strong>現有選秀房間與控制</strong><span class='muted'>開始 / 結束房間</span></div><div id='roomsList' style='margin-top:8px'></div></div></div></div><script>
+async function loadRooms(){
+  const d=await(await fetch('/api/draft/rooms')).json();
+  const el=document.getElementById('roomsList');
+  if(!d.ok){el.innerHTML='<div class="muted">無法讀取房間列表</div>';return;}
+  const list=d.rooms||[];
+  if(!list.length){el.innerHTML='<div class="muted">目前尚未建立任何選秀房間。</div>';return;}
+  el.innerHTML=list.map(r=>{
+    const teams=Array.isArray(r.team_order)?r.team_order.join(' → '):(r.team_order||'-');
+    return `<div class="room-item">
+      <div class="row" style="justify-content:space-between;margin-bottom:6px">
+        <div><strong>#${r.id} ${r.title}</strong> <span class="badge">${r.mode}</span> <span class="badge">${r.status}</span></div>
+        <div class="muted">預算 $${r.budget_per_team}｜上限 ${r.picks_per_team} 人｜${r.turn_seconds}s</div>
       </div>
-
-      <div class="row">
-        <input id="roomTitle" placeholder="選秀房名稱" value="2026 開季一軍競標" style="min-width:170px;" />
-        <input id="roomPassword" type="text" placeholder="房間密碼（可留空）" style="width:150px;" />
-        <select id="roomMode">
-          <option value="AUCTION">競標型 (AUCTION)</option>
-          <option value="SNAKE">蛇行指名 (SNAKE)</option>
-          <option value="LINEAR">固定順位指名 (LINEAR)</option>
-        </select>
-        <select id="targetSlot">
-          <option value="ACTIVE">入隊：一軍 (ACTIVE)</option>
-          <option value="MINORS">入隊：二軍 (MINORS)</option>
-        </select>
-        <label class="muted">人數 <input id="picksPerTeam" type="number" value="25" min="1" max="60" style="width:64px;" /></label>
-        <label class="muted">預設預算 <input id="budgetPerTeam" type="number" value="260" min="0" style="width:74px;" onchange="rebuildTeamBudgetInputs(false)" /></label>
-        <label class="muted">秒數 <input id="turnSeconds" type="number" value="30" min="5" max="600" style="width:64px;" /></label>
-        <label class="muted">加價延秒 <input id="bidExtend" type="number" value="10" min="3" max="120" style="width:64px;" /></label>
+      <div class="muted" style="margin-bottom:8px">隊伍：${teams}｜入隊：${r.target_slot}｜池：${r.pool_mode}</div>
+      <div class="row" style="margin-bottom:0">
+        <button type="button" onclick="ctrlRoom(${r.id},'start')">開始選秀</button>
+        <button type="button" class="secondary" onclick="ctrlRoom(${r.id},'finish')">結束並匯入名單</button>
+        <a href="/draft" style="color:#38bdf8;font-size:13px;margin-left:6px">前往前台加入 →</a>
       </div>
-
-      <div class="row">
-        <label class="muted">隊伍順位（逗號分隔）
-          <input id="teamOrderInput" value="台灣山林, 台灣海洋" style="width:220px;" oninput="rebuildTeamBudgetInputs(false)" />
-        </label>
-        <select id="poolMode">
-          <option value="FA">球員池：全體自由球員</option>
-          <option value="CUSTOM">球員池：指定球員 ID 清單</option>
-        </select>
-        <button type="button" onclick="createRoom()">建立選秀房（僅建立資料）</button>
-      </div>
-
-      <div class="budget-grid">
-        <strong style="font-size:13px;">各隊年度預算設定：</strong>
-        <div id="perTeamBudgetInputs" class="row" style="margin-bottom:0;"></div>
-        <button type="button" class="secondary" onclick="rebuildTeamBudgetInputs(true)">全部套用預設預算</button>
-      </div>
-
-      <textarea id="customPoolInput" rows="2" placeholder="若選『指定球員 ID 清單』，請每行或逗號輸入 player_id" style="width:100%; box-sizing:border-box;"></textarea>
-      <div id="adminMsg" class="msg" style="margin-top:8px;"></div>
-    </div>
-
-    <div class="card">
-      <strong>房間控管：開始選秀 / 結束並匯入名單</strong>
-      <div class="row" style="margin-top:10px; margin-bottom:0;">
-        <select id="manageRoomSelect" style="min-width:260px;"></select>
-        <button type="button" class="start" onclick="startRoom()">開始選秀</button>
-        <button type="button" class="warn" onclick="finishRoom()">結束選秀並匯入名單</button>
-      </div>
-    </div>
-  </div>
-
-<script>
-function rebuildTeamBudgetInputs(overwriteWithDefault = false) {
-  const container = document.getElementById('perTeamBudgetInputs');
-  const teams = teamOrderInput.value.split(',').map(s => s.trim()).filter(Boolean);
-  const defBudget = Number(budgetPerTeam.value || 260);
-  const existing = {};
-  container.querySelectorAll('input[data-team]').forEach(inp => { existing[inp.dataset.team] = inp.value; });
-  container.innerHTML = teams.map(t => {
-    const val = (!overwriteWithDefault && existing[t] !== undefined && existing[t] !== '') ? existing[t] : defBudget;
-    return `<label class="muted">${t}：<input type="number" min="0" data-team="${t}" value="${val}" style="width:82px;" /></label>`;
+    </div>`;
   }).join('');
 }
-
-function collectTeamBudgets() {
-  const map = {};
-  document.querySelectorAll('#perTeamBudgetInputs input[data-team]').forEach(inp => {
-    if (inp.dataset.team && inp.value !== '') map[inp.dataset.team] = Math.max(0, Number(inp.value));
-  });
-  return map;
+function setMsg(t,ok=false){const m=document.getElementById('adminMsg');m.style.color=ok?'#34d399':'#fbbf24';m.textContent=t||'';}
+async function createRoom(){
+  const title=document.getElementById('titleInput').value.trim();
+  const rawTeams=document.getElementById('teamsInput').value.split(',').map(s=>s.trim()).filter(Boolean);
+  const payload={
+    title:title||'新選秀房',
+    mode:document.getElementById('modeInput').value,
+    target_slot:document.getElementById('slotInput').value,
+    budget_per_team:Number(document.getElementById('budgetInput').value||260),
+    picks_per_team:Number(document.getElementById('picksInput').value||25),
+    turn_seconds:Number(document.getElementById('secInput').value||30),
+    bid_extend_seconds:Number(document.getElementById('extInput').value||10),
+    pool_mode:document.getElementById('poolModeInput').value,
+    room_password:document.getElementById('pwInput').value,
+    team_order:rawTeams.length?rawTeams:['台灣山林','台灣海洋']
+  };
+  const d=await(await fetch('/api/draft/rooms',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
+  if(d.ok){setMsg(`已建立房間 #${d.room_id}「${payload.title}」`,true);document.getElementById('titleInput').value='';await loadRooms();}
+  else setMsg(d.error||'建立房間失敗');
 }
-
-function applyPreset(type) {
-  if (type === 'AUCTION_25') {
-    roomTitle.value = '開季一軍競標'; roomMode.value = 'AUCTION'; targetSlot.value = 'ACTIVE';
-    picksPerTeam.value = 25; budgetPerTeam.value = 260; turnSeconds.value = 30; bidExtend.value = 10; poolMode.value = 'FA';
-  } else if (type === 'MINORS_DRAFT') {
-    roomTitle.value = '開季二軍指名'; roomMode.value = 'SNAKE'; targetSlot.value = 'MINORS';
-    picksPerTeam.value = 10; budgetPerTeam.value = 0; turnSeconds.value = 45; poolMode.value = 'FA';
-  } else if (type === 'ROOKIE_DRAFT') {
-    roomTitle.value = '季中新秀指名'; roomMode.value = 'LINEAR'; targetSlot.value = 'MINORS';
-    picksPerTeam.value = 5; budgetPerTeam.value = 0; turnSeconds.value = 45; poolMode.value = 'CUSTOM';
-  }
-  rebuildTeamBudgetInputs(true);
-}
-
-async function loadRooms() {
-  const res = await fetch('/api/draft/rooms');
-  const data = await res.json();
-  if (!data.ok) return;
-  manageRoomSelect.innerHTML = data.rooms.map(r => `<option value="${r.id}">#${r.id} ${r.title} (${r.status})</option>`).join('');
-}
-
-async function createRoom() {
-  const order = teamOrderInput.value.split(',').map(s => s.trim()).filter(Boolean);
-  const res = await fetch('/api/draft/rooms', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      title: roomTitle.value.trim() || '新選秀房',
-      room_password: roomPassword.value.trim(),
-      mode: roomMode.value,
-      target_slot: targetSlot.value,
-      picks_per_team: Number(picksPerTeam.value || 25),
-      budget_per_team: Number(budgetPerTeam.value || 0),
-      team_budgets: collectTeamBudgets(),
-      turn_seconds: Number(turnSeconds.value || 30),
-      bid_extend_seconds: Number(bidExtend.value || 10),
-      pool_mode: poolMode.value,
-      custom_pool_ids: customPoolInput.value,
-      team_order: order
-    })
-  });
-  const data = await res.json();
-  if (data.ok) {
-    adminMsg.textContent = `已建立選秀房 #${data.room_id}（等待加入中，尚未開始），玩家可至 /draft 選擇房間與密碼加入。`;
-    await loadRooms();
-  } else {
-    adminMsg.textContent = data.error || '建房失敗';
-  }
-}
-
-async function startRoom() {
-  const rid = manageRoomSelect.value;
-  if (!rid) return;
-  const res = await fetch(`/api/draft/rooms/${rid}/start`, { method: 'POST' });
-  const d = await res.json();
-  if (d.ok) adminMsg.textContent = `房間 #${rid} 已正式開始選秀！`;
-  else adminMsg.textContent = d.error || '開始選秀失敗';
+async function ctrlRoom(id,action){
+  const d=await(await fetch(`/api/draft/rooms/${id}/${action}`,{method:'POST'})).json();
+  setMsg(d.ok?`房間 #${id} 已執行 ${action}`:(d.error||'操作失敗'),Boolean(d.ok));
   await loadRooms();
 }
-
-async function finishRoom() {
-  const rid = manageRoomSelect.value;
-  if (!rid) return;
-  const res = await fetch(`/api/draft/rooms/${rid}/finish`, { method: 'POST' });
-  const d = await res.json();
-  if (d.ok) adminMsg.textContent = `房間 #${rid} 已結束並匯入 ${d.imported} 位球員至名單`;
-  await loadRooms();
-}
-
-rebuildTeamBudgetInputs(true);
 loadRooms();
+</script><script>
+(function(){
+  var isLocal = (location.hostname === '127.0.0.1' || location.hostname === 'localhost');
+  if (!isLocal) return;
+  document.querySelectorAll('a[href="/draft"]').forEach(function(a){
+    if (a.textContent.indexOf('前台') === -1) {
+      a.setAttribute('href', '/draft/admin');
+    }
+  });
+})();
 </script>
-</body>
-</html>
+</body></html>

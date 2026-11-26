@@ -640,5 +640,16 @@
       setTimeout(() => location.reload(), 600);
     }
   </script>
+<script>
+(function(){
+  var isLocal = (location.hostname === '127.0.0.1' || location.hostname === 'localhost');
+  if (!isLocal) return;
+  document.querySelectorAll('a[href="/draft"]').forEach(function(a){
+    if (a.textContent.indexOf('前台') === -1) {
+      a.setAttribute('href', '/draft/admin');
+    }
+  });
+})();
+</script>
 </body>
 </html>
