@@ -385,6 +385,17 @@ def ensure_extended_schema(cursor):
         cursor.execute("ALTER TABLE cpbl_games ADD COLUMN week_key TEXT DEFAULT ''")
     if "last_fetched_at" not in g_cols:
         cursor.execute("ALTER TABLE cpbl_games ADD COLUMN last_fetched_at TEXT DEFAULT ''")
+    # Seed 2026-11-26 Taiwan Mountain vs Taiwan Sea game if missing
+    cursor.execute("""
+        INSERT OR IGNORE INTO cpbl_games (
+            game_key, year, kind_code, game_sno, game_date, start_time, away_team, home_team, week_key, updated_at
+        )
+        VALUES (
+            '2026_P_20261126_山林_海洋', '2026', 'P', '20261126_山林_海洋',
+            '2026-11-26', '12:05', '台灣山林', '台灣海洋',
+            '2026-11-23_2026-11-29', CURRENT_TIMESTAMP
+        )
+    """)
 
     cursor.execute("SELECT 1 FROM team_rosters WHERE roster_slot = 'ACTIVE' AND (lineup_slot IS NULL OR lineup_slot = '' OR UPPER(lineup_slot) = 'BENCH') LIMIT 1")
     if cursor.fetchone() is not None:
