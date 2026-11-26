@@ -109,6 +109,14 @@
         </select>
       </div>
       <div>
+        <label class="text-xs text-slate-400 mr-2">調度日期</label>
+        <select id="targetDateSelect" name="target_date" onchange="this.form.submit()" class="bg-slate-800 border border-slate-700 text-slate-100 rounded-lg px-3 py-1.5 text-sm">
+          {% for d in lineup_dates %}
+          <option value="{{ d }}" {% if selected_target_date == d %}selected{% endif %}>{{ d }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
         <label class="text-xs text-slate-400 mr-2">對戰對手</label>
         <select name="opp" onchange="this.form.submit()" class="bg-slate-800 border border-slate-700 text-slate-100 rounded-lg px-3 py-1.5 text-sm">
           {% for ot in other_teams %}
@@ -486,6 +494,8 @@
     async function movePlayer(playerId, rosterSlot, lineupSlot) {
       const forceEl = document.getElementById("forceOverride");
       const force_override = forceEl ? forceEl.checked : false;
+      const tdEl = document.getElementById("targetDateSelect");
+      const target_date = tdEl ? tdEl.value : "{{ selected_target_date }}";
       const res = await fetch("/api/lineup/move", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
@@ -493,6 +503,7 @@
           player_id: playerId,
           roster_slot: rosterSlot,
           lineup_slot: lineupSlot,
+          target_date: target_date,
           force_override
         })
       });

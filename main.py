@@ -738,6 +738,9 @@ def is_game_locked_for_team(cursor, real_team: str | None, target_date: str | No
     if not real_team:
         return False, ""
     check_date = (target_date or date.today().isoformat()).strip()
+    today_str = date.today().isoformat()
+    if check_date > today_str:
+        return False, ""
     cursor.execute("""
         SELECT game_key, game_date, start_time, away_team, home_team
         FROM cpbl_games
@@ -751,9 +754,7 @@ def is_game_locked_for_team(cursor, real_team: str | None, target_date: str | No
         if not st_dt:
             continue
         if now_dt >= st_dt:
-            if _has_game_stats_imported(cursor, r["game_key"], r["game_date"]):
-                continue
-            return True, f"現實球隊【{real_team}】於 {r['game_date']} {st_dt.strftime('%H:%M')} 開賽且成績尚未入庫，該隊球員已鎖定（成績入庫後解鎖）"
+            return True, f"現實球隊【{real_team}】於 {r['game_date']} {st_dt.strftime('%H:%M')} 已開賽，該隊球員不得更動"
     return False, ""
 
 
@@ -1128,10 +1129,16 @@ def _query_players_block(
     return items
 
 
-def get_team_players_with_stats(fantasy_team: str, date_filter: str = "ALL", week_key: str = "ALL"):
+def get_team_players_with_stats(
+    fantasy_team: str,
+    date_filter: str = "ALL",
+    week_key: str = "ALL",
+    lineup_date: str | None = None,
+):
     conn = get_db()
     cursor = conn.cursor()
     ensure_extended_schema(cursor)
+    ensure_draft_schema(cursor)
 
     rows = _query_players_block(
         cursor,
@@ -1140,6 +1147,18 @@ def get_team_players_with_stats(fantasy_team: str, date_filter: str = "ALL", wee
         date_filter,
         week_key,
     )
+    eff_date = (lineup_date or (date_filter if date_filter and date_filter != "ALL" else date.today().isoformat())).strip()
+    eff_map = get_effective_lineup_map(cursor, fantasy_team, eff_date)
+    for item in rows:
+        pid = item["player_id"]
+        if pid in eff_map:
+            r_slot = (eff_map[pid].get("roster_slot") or item.get("roster_slot") or "ACTIVE").upper().strip()
+            l_slot = normalize_lineup_slot(eff_map[pid].get("lineup_slot") or item.get("lineup_slot"))
+            item["roster_slot"] = r_slot
+            item["lineup_slot"] = l_slot
+            item["slot"] = r_slot
+            item["is_scoring"] = (r_slot == "ACTIVE" and l_slot in SCORING_LINEUP_SLOTS)
+            item["slot_label"] = format_slot_label(l_slot if r_slot == "ACTIVE" else r_slot)
     conn.close()
 
     grouped = {
@@ -1511,19 +1530,50 @@ def read_matchup(
     code: str = None,
     opp: str = None,
     stat_date: str = None,
+    target_date: str = None,
     week: str = None,
     error: str = None,
 ):
     clear_free_agent_players()
     logged_team = resolve_logged_team(request, code)
     available_dates = get_available_dates()
-    today_str = date.today().isoformat()
+    today_dt = date.today()
+    today_str = today_dt.isoformat()
 
     selected_week = week if week in SCHEDULE_WEEK_MAP else get_default_week_for_today(today_str)
     if stat_date:
         selected_date = stat_date if (stat_date == "ALL" or stat_date in available_dates) else "ALL"
     else:
         selected_date = get_default_stat_date(available_dates, today_str)
+
+    upcoming_dates = [(today_dt + timedelta(days=i)).isoformat() for i in range(-1, 8)]
+    date_pool = set(available_dates) | set(upcoming_dates)
+    try:
+        c_tmp = get_db()
+        cur_tmp = c_tmp.cursor()
+        ensure_extended_schema(cur_tmp)
+        cur_tmp.execute("SELECT DISTINCT game_date FROM cpbl_games WHERE game_date IS NOT NULL AND game_date != ''")
+        for r_d in cur_tmp.fetchall():
+            date_pool.add(str(r_d["game_date"]).strip())
+        cur_tmp.execute("SELECT DISTINCT stat_date FROM daily_lineups WHERE stat_date IS NOT NULL AND stat_date != ''")
+        for r_d in cur_tmp.fetchall():
+            date_pool.add(str(r_d["stat_date"]).strip())
+        c_tmp.close()
+    except Exception:
+        pass
+    lineup_dates = sorted(date_pool, reverse=True)
+    if target_date and target_date in lineup_dates:
+        selected_target_date = target_date
+    elif target_date:
+        try:
+            date.fromisoformat(target_date)
+            selected_target_date = target_date
+            if selected_target_date not in lineup_dates:
+                lineup_dates = sorted(set(lineup_dates) | {selected_target_date}, reverse=True)
+        except ValueError:
+            selected_target_date = today_str
+    else:
+        selected_target_date = today_str
 
     schedule_games = get_schedule_games(selected_week)
 
@@ -1537,7 +1587,7 @@ def read_matchup(
     opponent_team = opp if opp in other_teams else (other_teams[0] if other_teams else "中信兄弟")
 
     if logged_team:
-        grouped_players = get_team_players_with_stats(logged_team, selected_date, selected_week)
+        grouped_players = get_team_players_with_stats(logged_team, selected_date, selected_week, selected_target_date)
         my_stats = calc_team_12_cats(logged_team, selected_date, selected_week)
         opp_stats = calc_team_12_cats(opponent_team, selected_date, selected_week)
 
@@ -1612,6 +1662,8 @@ def read_matchup(
             "opponent_team": opponent_team,
             "available_dates": available_dates,
             "selected_date": selected_date,
+            "lineup_dates": lineup_dates,
+            "selected_target_date": selected_target_date,
             "active_players": grouped_players["ACTIVE"],
             "minors_players": grouped_players["MINORS"],
             "il_players": grouped_players["IL"],
